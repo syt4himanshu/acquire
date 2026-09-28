@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { CircleCheck, Gauge, WifiOff } from 'lucide-react';
+import { CheckCircle2, CircleCheck, Gauge, WifiOff } from 'lucide-react';
 import api from '../../api/axios';
 import QRScanner from '../../components/shopkeeper/QRScanner';
 import DispenseWeighingPanel from '../../components/shopkeeper/DispenseWeighingPanel';
@@ -97,6 +97,9 @@ const ScanAndDispense = () => {
   const [weighingSession, setWeighingSession] = useState(null);
   const [riceSessionId, setRiceSessionId] = useState(null);
   const [wheatSessionId, setWheatSessionId] = useState(null);
+  // Store measured grams from the IoT scale for each commodity
+  const [riceMeasuredGrams, setRiceMeasuredGrams] = useState(null);
+  const [wheatMeasuredGrams, setWheatMeasuredGrams] = useState(null);
 
   useEffect(() => {
     let isMounted = true;
@@ -147,6 +150,8 @@ const ScanAndDispense = () => {
     setWeighingSession(null);
     setRiceSessionId(null);
     setWheatSessionId(null);
+    setRiceMeasuredGrams(null);
+    setWheatMeasuredGrams(null);
   };
 
   const fetchBeneficiary = async (payload) => {
@@ -214,13 +219,15 @@ const ScanAndDispense = () => {
     }
   };
 
-  const handleWeighingDone = (outcome) => {
+  const handleWeighingDone = (outcome, measuredGrams) => {
     if (outcome === 'committed' && weighingSession) {
       if (weighingSession.commodity === 'rice') {
         setRiceSessionId(weighingSession.sessionId);
+        setRiceMeasuredGrams(measuredGrams || weighingSession.entitledGrams);
         toast.success('Rice weighing verified! Now proceed to Wheat weighing.');
       } else if (weighingSession.commodity === 'wheat') {
         setWheatSessionId(weighingSession.sessionId);
+        setWheatMeasuredGrams(measuredGrams || weighingSession.entitledGrams);
         toast.success('Wheat weighing verified! Ready for final dispense.');
       }
     } else {
@@ -349,12 +356,17 @@ const ScanAndDispense = () => {
             <div className="space-y-3">
               {/* Step 1: Rice */}
               <div className="flex items-center justify-between rounded-md border p-3 border-border-default">
-                <div>
+                <div className="flex-1">
                   <p className="font-medium text-text-primary">Step 1: Rice Weighing ({quantities.rice_qty_kg} kg)</p>
                   <p className="text-xs text-text-secondary">Target: {allocation?.rice_grams || 0} g</p>
+                  {riceSessionId && riceMeasuredGrams !== null && (
+                    <p className="text-xs text-success-text font-medium mt-1">
+                      ✓ Measured: {riceMeasuredGrams} g
+                    </p>
+                  )}
                 </div>
                 {riceSessionId ? (
-                  <Badge status="success">Verified ✓</Badge>
+                  <Badge status="success" icon={<CheckCircle2 size={14} />}>Verified</Badge>
                 ) : (
                   <Button
                     variant="primary"
@@ -370,12 +382,17 @@ const ScanAndDispense = () => {
 
               {/* Step 2: Wheat */}
               <div className="flex items-center justify-between rounded-md border p-3 border-border-default">
-                <div>
+                <div className="flex-1">
                   <p className="font-medium text-text-primary">Step 2: Wheat Weighing ({quantities.wheat_qty_kg} kg)</p>
                   <p className="text-xs text-text-secondary">Target: {allocation?.wheat_grams || 0} g</p>
+                  {wheatSessionId && wheatMeasuredGrams !== null && (
+                    <p className="text-xs text-success-text font-medium mt-1">
+                      ✓ Measured: {wheatMeasuredGrams} g
+                    </p>
+                  )}
                 </div>
                 {wheatSessionId ? (
-                  <Badge status="success">Verified ✓</Badge>
+                  <Badge status="success" icon={<CheckCircle2 size={14} />}>Verified</Badge>
                 ) : (
                   <Button
                     variant="primary"
@@ -391,6 +408,22 @@ const ScanAndDispense = () => {
               </div>
             </div>
 
+            {bothWeighed && (
+              <Card className="border-success-border bg-success-bg/10">
+                <h4 className="text-sm font-semibold text-text-primary mb-3">Transaction Summary</h4>
+                <div className="space-y-1.5 text-sm">
+                  <div className="flex justify-between">
+                    <span className="text-text-secondary">Rice:</span>
+                    <span className="font-medium text-text-primary">{riceMeasuredGrams} g</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-text-secondary">Wheat:</span>
+                    <span className="font-medium text-text-primary">{wheatMeasuredGrams} g</span>
+                  </div>
+                </div>
+              </Card>
+            )}
+
             <div className="flex flex-col gap-3 sm:flex-row pt-2">
               <Button
                 variant="primary"
@@ -398,7 +431,7 @@ const ScanAndDispense = () => {
                 onClick={handleOpenConfirm}
                 disabled={!bothWeighed}
               >
-                Confirm &amp; Complete Dispense
+                Complete Transaction
               </Button>
               <Button variant="secondary" className="h-11 flex-1" onClick={resetToScan}>
                 Scan Again
@@ -421,32 +454,68 @@ const ScanAndDispense = () => {
       )}
 
       {flowState === FLOW.SUCCESS && dispenseResult && (
-        <Card className="text-center">
-          <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full border border-success-border bg-success-bg text-success-text">
-            <CircleCheck size={32} />
-          </div>
-          <h2 className="mt-4 text-2xl font-bold text-text-primary">Dispensed Successfully</h2>
+        <Modal
+          isOpen={true}
+          onClose={resetToScan}
+          title=""
+          className="max-w-lg"
+        >
+          <div className="text-center">
+            <div className="mx-auto flex h-20 w-20 items-center justify-center rounded-full bg-success-bg border-2 border-success-border">
+              <CircleCheck size={48} className="text-success-text" />
+            </div>
+            <h2 className="mt-4 text-2xl font-bold text-text-primary">Transaction Completed</h2>
 
-          <div className="mt-5 space-y-2 text-sm text-text-secondary">
-            <p>
-              Dispensed: Rice {dispenseResult.dispensed.rice_qty_kg} kg, Wheat {dispenseResult.dispensed.wheat_qty_kg} kg
-            </p>
-            <p>
-              Remaining: Rice {dispenseResult.remaining_wallet.rice_balance_kg} kg, Wheat{' '}
-              {dispenseResult.remaining_wallet.wheat_balance_kg} kg
-            </p>
-          </div>
+            <div className="mt-6 space-y-4 text-left">
+              <div className="rounded-md border border-border-default bg-surface-muted p-4">
+                <p className="text-sm font-semibold text-text-primary mb-2">Beneficiary</p>
+                <p className="text-base font-medium text-text-primary">{beneficiary.name}</p>
+                <p className="text-sm text-text-secondary">Card: {beneficiary.card_number}</p>
+              </div>
 
-          <Button variant="primary" className="mt-6 h-11 px-6" onClick={resetToScan}>
-            Scan Next
-          </Button>
-        </Card>
+              <div className="rounded-md border border-border-default bg-surface-muted p-4">
+                <p className="text-sm font-semibold text-text-primary mb-3">Dispensed Quantities</p>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm text-text-secondary">Rice:</span>
+                    <span className="text-base font-semibold text-text-primary">
+                      {riceMeasuredGrams} g ({dispenseResult.dispensed.rice_qty_kg} kg)
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm text-text-secondary">Wheat:</span>
+                    <span className="text-base font-semibold text-text-primary">
+                      {wheatMeasuredGrams} g ({dispenseResult.dispensed.wheat_qty_kg} kg)
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="rounded-md border border-border-default bg-surface-muted p-4">
+                <p className="text-sm font-semibold text-text-primary mb-2">Transaction Details</p>
+                <p className="text-xs text-text-secondary break-all">
+                  ID: {dispenseResult.transaction.id}
+                </p>
+                <p className="text-xs text-text-secondary mt-1">
+                  Entitlement successfully deducted.
+                </p>
+                <p className="text-xs text-text-secondary">
+                  Blockchain: Anchoring initiated
+                </p>
+              </div>
+            </div>
+
+            <Button variant="primary" className="mt-6 w-full h-11" onClick={resetToScan}>
+              Scan Next Beneficiary
+            </Button>
+          </div>
+        </Modal>
       )}
 
       <Modal
         isOpen={flowState === FLOW.CONFIRMATION}
         onClose={() => setFlowState(FLOW.BENEFICIARY_LOADED)}
-        title="Confirm Dispense"
+        title="Confirm Transaction"
         footer={
           <>
             <Button variant="secondary" onClick={() => setFlowState(FLOW.BENEFICIARY_LOADED)}>
@@ -458,10 +527,19 @@ const ScanAndDispense = () => {
           </>
         }
       >
-        <p className="mb-4 text-sm text-text-secondary">Beneficiary: {beneficiary?.name}</p>
-        <div className="space-y-1 text-sm text-text-primary">
-          <p>Rice (IoT Verified): {quantities.rice_qty_kg} kg</p>
-          <p>Wheat (IoT Verified): {quantities.wheat_qty_kg} kg</p>
+        <div className="space-y-4">
+          <p className="text-sm text-text-secondary">Beneficiary: <span className="font-medium text-text-primary">{beneficiary?.name}</span></p>
+          <div className="rounded-md border border-border-default bg-surface-muted p-3 space-y-2">
+            <div className="flex justify-between text-sm">
+              <span className="text-text-secondary">Rice (IoT Verified):</span>
+              <span className="font-medium text-text-primary">{riceMeasuredGrams} g ({quantities.rice_qty_kg} kg)</span>
+            </div>
+            <div className="flex justify-between text-sm">
+              <span className="text-text-secondary">Wheat (IoT Verified):</span>
+              <span className="font-medium text-text-primary">{wheatMeasuredGrams} g ({quantities.wheat_qty_kg} kg)</span>
+            </div>
+          </div>
+          <p className="text-xs text-text-secondary">This will deduct the entitlement from the beneficiary's wallet and record the transaction.</p>
         </div>
       </Modal>
     </div>

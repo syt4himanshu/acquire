@@ -102,6 +102,41 @@ const cancelSession = async (req, res, next) => {
     }
 };
 
+// POST /api/dispense/session/:id/confirm
+// Immediately commits a session that is in the 'confirming' state when the
+// shopkeeper manually clicks OK. This short-circuits the backend's auto-commit
+// countdown timer (which would otherwise commit the session after 3 seconds of
+// stable weight). The measured grams are derived from the average of the
+// backend's stability window — the same calculation the auto-timer uses.
+const confirmSession = async (req, res, next) => {
+    try {
+        const shop = await getAssignedShop(pool, req.user.id);
+        if (!shop) {
+            return res.status(404).json({ error: "No active shop assigned" });
+        }
+
+        const result = await dispenseSessionService.manualConfirm(req.params.id, shop.id);
+        if (!result.ok) {
+            return sendServiceError(res, result);
+        }
+
+        logger.info("[IoT] Dispense session manually confirmed by shopkeeper", {
+            shopId: shop.id,
+            sessionId: req.params.id,
+            measuredGrams: result.measuredGrams,
+        });
+
+        return res.status(200).json({
+            session_id: result.sessionId,
+            state: result.state,
+            measured_grams: result.measuredGrams,
+            dispense_record_id: result.dispenseRecordId,
+        });
+    } catch (err) {
+        return next(err);
+    }
+};
+
 // GET /api/dispense/device-status — lets the shopkeeper's dispense screen
 // know whether to offer the IoT weighing path at all for its own shop, and
 // show the scale as ONLINE/OFFLINE.
@@ -175,4 +210,4 @@ const getSession = async (req, res, next) => {
     }
 };
 
-module.exports = { createSession, attachSession, cancelSession, getSession, getDeviceStatus };
+module.exports = { createSession, attachSession, cancelSession, confirmSession, getSession, getDeviceStatus };

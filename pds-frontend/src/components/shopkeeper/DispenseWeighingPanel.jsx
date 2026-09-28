@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { WifiOff } from 'lucide-react';
+import { CheckCircle2, WifiOff } from 'lucide-react';
 import Card from '../ui/Card';
 import Button from '../ui/Button';
 import Modal from '../ui/Modal';
@@ -13,11 +13,7 @@ const TERMINAL_STATES = [
     'cancelled',
     'device_lost',
     'failed_insufficient_balance',
-    // Raised when the card's monthly claim for this commodity was taken by
-    // another dispense (manual or IoT) while this session was open.
     'failed_already_claimed',
-    // Raised by commitSession's tolerance guard when the final measurement is
-    // outside the session's allowed deviation.
     'failed_out_of_tolerance',
 ];
 
@@ -28,10 +24,6 @@ const resolveWsUrl = () => {
 
 const COMMODITY_LABEL = { rice: 'rice', wheat: 'wheat' };
 
-// The IoT-gated dispense screen from Phase 2: beneficiary card on top, a big
-// live weight readout with a tolerance band in the middle, Cancel always
-// available at the bottom. Never shows a modal while weighing — only for
-// terminal outcomes (confirmed / cancelled / failed), per spec.
 const DispenseWeighingPanel = ({
     sessionId,
     commodity,
@@ -46,6 +38,8 @@ const DispenseWeighingPanel = ({
     const [gramsInt, setGramsInt] = useState(0);
     const [msLeft, setMsLeft] = useState(null);
     const [cancelling, setCancelling] = useState(false);
+    const [confirming, setConfirming] = useState(false);
+    const [measuredGramsConfirmed, setMeasuredGramsConfirmed] = useState(null);
 
     const wsRef = useRef(null);
     const reconnectTimerRef = useRef(null);
@@ -80,6 +74,10 @@ const DispenseWeighingPanel = ({
                         setMsLeft(payload.msLeft);
                     } else if (payload.state !== 'confirming') {
                         setMsLeft(null);
+                    }
+                    // When backend auto-commits or manually confirmed, record the measured grams
+                    if (payload.state === 'committed' && typeof payload.measuredGrams === 'number') {
+                        setMeasuredGramsConfirmed(payload.measuredGrams);
                     }
                 }
             };
@@ -131,6 +129,23 @@ const DispenseWeighingPanel = ({
         }
     };
 
+    const handleConfirm = async () => {
+        setConfirming(true);
+        try {
+            const res = await api.post(`/api/dispense/session/${sessionId}/confirm`);
+            // The manual confirm endpoint returns the measured_grams immediately
+            if (res.data?.measured_grams !== undefined) {
+                setMeasuredGramsConfirmed(res.data.measured_grams);
+            }
+            // The WS will also send the 'committed' state event, which onDone handles
+        } catch (err) {
+            // If confirm fails, the session might revert to weighing or reach a failure state
+            console.error('Manual confirm failed:', err);
+        } finally {
+            setConfirming(false);
+        }
+    };
+
     const diff = gramsInt - entitledGrams;
     const absDiff = Math.abs(diff);
     const commodityLabel = COMMODITY_LABEL[commodity] || commodity;
@@ -142,6 +157,7 @@ const DispenseWeighingPanel = ({
         band = 'amber';
     }
 
+    // Status text logic
     let stateText;
     if (!connected) {
         stateText = 'Reconnecting…';
@@ -158,8 +174,7 @@ const DispenseWeighingPanel = ({
     } else if (sessionState === 'failed_out_of_tolerance') {
         stateText = 'Weight outside tolerance';
     } else if (sessionState === 'confirming') {
-        const seconds = Math.max(1, Math.ceil((msLeft ?? 0) / 1000));
-        stateText = `Hold — confirming in ${seconds}…`;
+        stateText = '✓ Weight Stable';
     } else if (gramsInt < 50) {
         stateText = 'Place the container';
     } else if (diff < -toleranceGrams) {
@@ -167,7 +182,7 @@ const DispenseWeighingPanel = ({
     } else if (diff > toleranceGrams) {
         stateText = `Remove ${commodityLabel}`;
     } else {
-        stateText = 'Steady…';
+        stateText = 'Stabilizing...';
     }
 
     const bandClasses = {
@@ -177,6 +192,7 @@ const DispenseWeighingPanel = ({
     };
 
     const isTerminal = TERMINAL_STATES.includes(sessionState);
+    const showOkButton = sessionState === 'confirming' && connected && !confirming;
 
     return (
         <div className="space-y-4">
@@ -189,6 +205,9 @@ const DispenseWeighingPanel = ({
                 {sessionState === 'device_lost' && (
                     <WifiOff size={28} className="mx-auto mb-2" aria-hidden="true" />
                 )}
+                {sessionState === 'confirming' && (
+                    <CheckCircle2 size={28} className="mx-auto mb-2 text-success-text" aria-hidden="true" />
+                )}
                 <p className="text-5xl font-bold tabular-nums">{gramsInt.toLocaleString()} g</p>
                 <p className="mt-2 text-sm text-text-secondary">
                     Target: {entitledGrams.toLocaleString()} g &plusmn; {toleranceGrams}g
@@ -198,35 +217,40 @@ const DispenseWeighingPanel = ({
                 </p>
             </Card>
 
-            <Button
-                variant="danger"
-                className="h-12 w-full text-base"
-                onClick={handleCancel}
-                disabled={cancelling || isTerminal}
-            >
-                {cancelling ? 'Cancelling…' : 'Cancel'}
-            </Button>
+            <div className="flex gap-3">
+                {showOkButton && (
+                    <Button
+                        variant="primary"
+                        className="h-12 flex-1 text-base"
+                        onClick={handleConfirm}
+                        disabled={confirming}
+                    >
+                        {confirming ? 'Confirming...' : 'OK'}
+                    </Button>
+                )}
+                <Button
+                    variant="danger"
+                    className={`h-12 text-base ${showOkButton ? 'flex-1' : 'w-full'}`}
+                    onClick={handleCancel}
+                    disabled={cancelling || isTerminal}
+                >
+                    {cancelling ? 'Cancelling…' : 'Cancel'}
+                </Button>
+            </div>
 
             <Modal
                 isOpen={isTerminal}
-                onClose={() => onDone(sessionState)}
+                onClose={() => onDone(sessionState, measuredGramsConfirmed)}
                 title={stateText}
                 footer={
-                    <Button variant="primary" onClick={() => onDone(sessionState)}>
+                    <Button variant="primary" onClick={() => onDone(sessionState, measuredGramsConfirmed)}>
                         Done
                     </Button>
                 }
             >
                 <p className="text-sm text-text-secondary">
-                    {/* The committed line quotes the ENTITLEMENT, not the last
-                        live reading. The wallet is debited by the authorised
-                        allocation (measured_grams is kept on dispense_records for
-                        audit), so quoting the reading here would tell the
-                        beneficiary a different number from the one on their
-                        transaction. */}
                     {sessionState === 'committed' &&
-                        `Verified ${entitledGrams.toLocaleString()}g of ${commodityLabel} for ${beneficiaryName} ` +
-                        `(measured ${gramsInt.toLocaleString()}g, within the ${toleranceGrams}g tolerance).`}
+                        `Verified ${measuredGramsConfirmed?.toLocaleString() || entitledGrams.toLocaleString()}g of ${commodityLabel} for ${beneficiaryName}.`}
                     {sessionState === 'cancelled' && 'The dispense was cancelled. Nothing was debited.'}
                     {sessionState === 'device_lost' &&
                         'The weighing scale disconnected — please reconnect it and restart the dispense. Nothing was debited.'}

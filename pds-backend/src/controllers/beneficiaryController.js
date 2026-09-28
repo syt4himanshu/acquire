@@ -161,7 +161,7 @@ const createQrSession = async (req, res, next) => {
         const { ration_card_id: rationCardId, shop_id: shopId } = rcResult.rows[0];
 
         const sessionId = crypto.randomBytes(32).toString("hex");
-        const expiresAt = new Date(Date.now() + 60 * 1000); // 60 seconds
+        const expiresAt = new Date(Date.now() + 120 * 1000); // 120 seconds
 
         await pool.query(
             `INSERT INTO qr_sessions

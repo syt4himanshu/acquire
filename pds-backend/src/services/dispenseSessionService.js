@@ -18,7 +18,7 @@ const {
 } = require("./monthlyClaimService");
 const metrics = require("../config/metrics");
 
-const SESSION_TTL_MS = 60 * 1000;
+const SESSION_TTL_MS = 120 * 1000;
 
 const COMMODITY_BALANCE_COLUMN = {
     rice: "rice_balance_kg",
@@ -632,6 +632,103 @@ const commitSession = async (sessionId, measuredGrams) => {
     }
 };
 
+// POST /api/dispense/session/:id/confirm — manual confirm by shopkeeper when
+// they click OK on a stable weight. Only works if the session is in the
+// 'confirming' state (i.e., the backend stability detector already passed).
+// Derives measuredGrams from the most recent sensor_readings in the stability
+// window (same logic the auto-timer uses, just pulled from the DB instead of
+// the WebSocket's in-memory sessionReadings array).
+const manualConfirm = async (sessionId, shopId) => {
+    const client = await pool.connect();
+    try {
+        await client.query("BEGIN");
+
+        const sessionResult = await client.query(
+            `SELECT id, shop_id, state, entitled_grams, tolerance_grams, commodity
+       FROM dispense_sessions WHERE id = $1 FOR UPDATE`,
+            [sessionId],
+        );
+        if (sessionResult.rows.length === 0) {
+            await client.query("ROLLBACK");
+            return { ok: false, status: 404, code: "IOT_SESSION_NOT_FOUND", message: "Session not found" };
+        }
+        const session = sessionResult.rows[0];
+        if (session.shop_id !== shopId) {
+            await client.query("ROLLBACK");
+            return { ok: false, status: 403, code: "IOT_SESSION_WRONG_SHOP", message: "Session belongs to another shop" };
+        }
+        if (session.state !== "confirming") {
+            await client.query("ROLLBACK");
+            return {
+                ok: false,
+                status: 409,
+                code: "IOT_SESSION_NOT_CONFIRMING",
+                message: `Session is ${session.state}, not confirming`,
+            };
+        }
+
+        // Query the most recent sensor readings for this session within the
+        // stability window (3 seconds). The stability detector already verified
+        // that these readings are stable and within tolerance when it moved the
+        // session to 'confirming', so this is just re-deriving the same
+        // measurement the auto-timer would have used.
+        const { STABILITY_WINDOW_MS } = require("../config/iot");
+        const readingsResult = await client.query(
+            `SELECT grams_int FROM sensor_readings
+       WHERE session_id = $1 AND taken_at >= NOW() - INTERVAL '1 millisecond' * $2
+       ORDER BY taken_at DESC`,
+            [sessionId, STABILITY_WINDOW_MS],
+        );
+
+        if (readingsResult.rows.length === 0) {
+            await client.query("ROLLBACK");
+            logger.warn("[IoT] No readings in stability window at manual confirm time", { sessionId });
+            return {
+                ok: false,
+                status: 400,
+                code: "IOT_NO_READINGS",
+                message: "No readings available to confirm",
+            };
+        }
+
+        const measuredGrams = Math.round(
+            readingsResult.rows.reduce((sum, r) => sum + Number(r.grams_int), 0) / readingsResult.rows.length,
+        );
+
+        await client.query("ROLLBACK");
+
+        // Commit outside the transaction so commitSession's own transaction
+        // isn't nested (pool.connect() doesn't support nested transactions).
+        const result = await commitSession(sessionId, measuredGrams);
+        if (!result.success) {
+            return {
+                ok: false,
+                status: 400,
+                code: "IOT_COMMIT_FAILED",
+                message: `Commit failed: ${result.reason}`,
+            };
+        }
+
+        return {
+            ok: true,
+            sessionId,
+            state: "committed",
+            measuredGrams,
+            dispenseRecordId: result.dispenseRecordId,
+        };
+    } catch (err) {
+        try {
+            await client.query("ROLLBACK");
+        } catch (_) {
+            // ignore
+        }
+        logger.error("[IoT] manualConfirm failed", { message: err.message, sessionId });
+        return { ok: false, status: 500, code: "IOT_CONFIRM_FAILED", message: "Manual confirm failed" };
+    } finally {
+        client.release();
+    }
+};
+
 module.exports = {
     ToleranceConfigurationError,
     computeToleranceGrams,
@@ -646,5 +743,6 @@ module.exports = {
     markDeviceLost,
     expireIfStale,
     commitSession,
+    manualConfirm,
     COMMODITY_BALANCE_COLUMN,
 };
