@@ -1,5 +1,6 @@
 const path = require("path");
 const dotenv = require("dotenv");
+
 // Resolve .env from project root (pds-backend/) regardless of cwd
 dotenv.config({ path: path.resolve(__dirname, "../.env") });
 
@@ -14,13 +15,14 @@ const { startAnomalyRulesCron } = require("./jobs/anomalyRulesCron");
 const { attachWebSocketServers } = require("./ws/attachSockets");
 
 const VALID_NODE_ENVS = ["development", "production", "test"];
+
+// Only these variables are mandatory for local startup.
+// Twilio is optional for local development.
 const REQUIRED_ENV_VARS = [
   "JWT_SECRET",
-  "TWILIO_ACCOUNT_SID",
-  "TWILIO_AUTH_TOKEN",
-  "TWILIO_SERVICE_SID",
   "NODE_ENV",
 ];
+
 const PORT = Number(process.env.PORT) || 5000;
 const HOST = process.env.HOST || "0.0.0.0";
 let server;
@@ -32,11 +34,13 @@ const redactDatabaseUrl = (url) => {
 
 const validateEnvironment = () => {
   const errors = [];
+
   const missingVars = REQUIRED_ENV_VARS.filter(
     (name) => !process.env[name] || process.env[name].trim() === "",
   );
 
   const nodeEnv = process.env.NODE_ENV;
+
   if (!nodeEnv) {
     errors.push(
       "NODE_ENV is required and must be one of production, development, test",
@@ -47,7 +51,9 @@ const validateEnvironment = () => {
     );
   }
 
-  const dbVarName = nodeEnv === "test" ? "TEST_DATABASE_URL" : "DATABASE_URL";
+  const dbVarName =
+    nodeEnv === "test" ? "TEST_DATABASE_URL" : "DATABASE_URL";
+
   if (!process.env[dbVarName] || process.env[dbVarName].trim() === "") {
     missingVars.push(dbVarName);
   }
@@ -68,6 +74,7 @@ const validateEnvironment = () => {
 const verifyDatabaseConnection = async () => {
   try {
     const result = await pool.query("SELECT 1 AS result");
+
     logger.info("PostgreSQL connectivity verified", {
       nodeEnv: process.env.NODE_ENV,
       databaseUrl: redactDatabaseUrl(process.env.DATABASE_URL),
@@ -78,7 +85,10 @@ const verifyDatabaseConnection = async () => {
       message: error.message,
       stack: error.stack,
     });
-    throw new Error(`Database connectivity check failed: ${error.message}`);
+
+    throw new Error(
+      `Database connectivity check failed: ${error.message}`,
+    );
   }
 };
 
@@ -122,6 +132,7 @@ const ensureDatabaseGuards = async () => {
 
   await pool.query(`
     DROP TRIGGER IF EXISTS trg_prevent_admin_user_delete ON users;
+
     CREATE TRIGGER trg_prevent_admin_user_delete
     BEFORE DELETE ON users
     FOR EACH ROW
@@ -141,6 +152,7 @@ const shutdown = async (reason) => {
 
   if (server) {
     logger.info("Closing HTTP server");
+
     server.close((err) => {
       if (err) {
         logger.error("HTTP server close failed", {
@@ -153,7 +165,9 @@ const shutdown = async (reason) => {
 
   try {
     logger.info("Closing database pool");
+
     await pool.end();
+
     logger.info("Database pool closed");
   } catch (error) {
     logger.error("Failed to close database pool", {
@@ -170,6 +184,7 @@ process.on("uncaughtException", (error) => {
     message: error.message,
     stack: error.stack,
   });
+
   shutdown(error);
 });
 
@@ -178,6 +193,7 @@ process.on("unhandledRejection", (reason) => {
     reason: reason instanceof Error ? reason.message : reason,
     stack: reason instanceof Error ? reason.stack : undefined,
   });
+
   shutdown(new Error("Unhandled promise rejection"));
 });
 
@@ -187,8 +203,11 @@ process.on("SIGINT", () => shutdown("SIGINT"));
 const startServer = async () => {
   try {
     validateEnvironment();
+
     await verifyDatabaseConnection();
+
     await ensureDatabaseGuards();
+
     startEntitlementCron();
     startOtpCleanupCron();
     startAnomalyDetectionCron();
@@ -197,6 +216,7 @@ const startServer = async () => {
 
     // Enhanced startup diagnostics
     logger.info("===== BACKEND STARTUP DIAGNOSTICS =====");
+
     logger.info("Server Configuration", {
       NODE_ENV: process.env.NODE_ENV,
       PORT: PORT,
@@ -204,21 +224,25 @@ const startServer = async () => {
       JWT_SECRET_SET: !!process.env.JWT_SECRET,
       CORS_ORIGINS: process.env.CORS_ORIGINS || "not set",
       CORS_ALLOW_ALL_DEV_ORIGINS:
-        process.env.CORS_ALLOW_ALL_DEV_ORIGINS || "true (default)",
+        process.env.CORS_ALLOW_ALL_DEV_ORIGINS ||
+        "true (default)",
       DATABASE_URL_HOST: process.env.DATABASE_URL
         ? new URL(process.env.DATABASE_URL).hostname
         : "not set",
     });
+
     logger.info("========================================");
 
     server = app.listen(PORT, HOST, () => {
       logger.info(`Server running on ${HOST}:${PORT}`);
+
       logger.info("Available Endpoints:", {
         health: `http://${HOST}:${PORT}/health`,
         debugCors: `http://${HOST}:${PORT}/debug/cors`,
         apiInfo: `http://${HOST}:${PORT}/api-info`,
         authLogin: `http://${HOST}:${PORT}/auth/login (POST)`,
       });
+
       if (process.env.NODE_ENV !== "production") {
         logger.info(`Local access: http://localhost:${PORT}`);
       }
@@ -234,6 +258,7 @@ const startServer = async () => {
             port: PORT,
           },
         );
+
         process.exit(1);
       }
 
@@ -241,6 +266,7 @@ const startServer = async () => {
         message: error.message,
         stack: error.stack,
       });
+
       process.exit(1);
     });
   } catch (error) {
@@ -248,6 +274,7 @@ const startServer = async () => {
       message: error.message,
       stack: error.stack,
     });
+
     process.exit(1);
   }
 };
@@ -256,4 +283,7 @@ if (process.env.NODE_ENV !== "test") {
   startServer();
 }
 
-module.exports = { validateEnvironment, startServer };
+module.exports = {
+  validateEnvironment,
+  startServer,
+};
