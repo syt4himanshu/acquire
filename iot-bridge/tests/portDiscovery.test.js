@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { describePorts, likelyEsp32Ports, resolvePort } = require("../src/portDiscovery");
+const { describePorts, likelyEsp32Ports, resolvePort, normalisePortPath } = require("../src/portDiscovery");
 
 // Port lists are passed in as fixtures, so every discovery decision is verified
 // without a board attached — including the ones that are hard to stage by hand
@@ -107,5 +107,55 @@ test("resolvePort — pinned IOT_SERIAL_PORT", async (t) => {
         const result = resolvePort({ configuredPath: "COM3", ports: [BLUETOOTH] });
         assert.equal(result.ok, true);
         assert.equal(result.path, "COM3");
+    });
+
+    await t.test("matches /dev/cu.xxx to /dev/tty.xxx on macOS", () => {
+        // macOS creates both cu and tty devices for each USB serial port.
+        // Operator configures cu (recommended), but SerialPort.list() returns tty.
+        const macOsPort = { path: "/dev/tty.usbserial-10", vendorId: "1A86", productId: "7523" };
+        const result = resolvePort({ configuredPath: "/dev/cu.usbserial-10", ports: [macOsPort] });
+        assert.equal(result.ok, true);
+        assert.equal(result.path, "/dev/tty.usbserial-10");
+        assert.match(result.reason, /IOT_SERIAL_PORT/);
+    });
+
+    await t.test("matches /dev/tty.xxx to /dev/cu.xxx on macOS", () => {
+        // Works both ways: if operator configured tty, match it to cu
+        const macOsPort = { path: "/dev/cu.usbserial-10", vendorId: "1A86", productId: "7523" };
+        const result = resolvePort({ configuredPath: "/dev/tty.usbserial-10", ports: [macOsPort] });
+        assert.equal(result.ok, true);
+        assert.equal(result.path, "/dev/cu.usbserial-10");
+    });
+});
+
+test("normalisePortPath — macOS cu/tty normalisation", async (t) => {
+    await t.test("normalises /dev/cu.xxx to /dev/tty.xxx", () => {
+        assert.equal(normalisePortPath("/dev/cu.usbserial-10"), "/dev/tty.usbserial-10");
+        assert.equal(normalisePortPath("/dev/CU.USBSERIAL-10"), "/dev/tty.usbserial-10");
+    });
+
+    await t.test("passes through /dev/tty.xxx unchanged (except lowercasing)", () => {
+        assert.equal(normalisePortPath("/dev/tty.usbserial-10"), "/dev/tty.usbserial-10");
+        assert.equal(normalisePortPath("/dev/TTY.USBSERIAL-10"), "/dev/tty.usbserial-10");
+    });
+
+    await t.test("trims whitespace", () => {
+        assert.equal(normalisePortPath("  /dev/cu.usbserial-10  "), "/dev/tty.usbserial-10");
+    });
+
+    await t.test("passes through Windows COM ports unchanged (except lowercasing)", () => {
+        assert.equal(normalisePortPath("COM5"), "com5");
+        assert.equal(normalisePortPath(" COM7 "), "com7");
+    });
+
+    await t.test("passes through Linux /dev/ttyUSB* unchanged (except lowercasing)", () => {
+        assert.equal(normalisePortPath("/dev/ttyUSB0"), "/dev/ttyusb0");
+        assert.equal(normalisePortPath("/dev/ttyACM0"), "/dev/ttyacm0");
+    });
+
+    await t.test("handles empty/null/undefined", () => {
+        assert.equal(normalisePortPath(""), "");
+        assert.equal(normalisePortPath(null), "");
+        assert.equal(normalisePortPath(undefined), "");
     });
 });

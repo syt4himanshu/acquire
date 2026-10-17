@@ -1,475 +1,236 @@
 // eslint-disable-next-line no-unused-vars
-import React from 'react';
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, waitFor } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
-import { MemoryRouter } from 'react-router-dom';
-import ScanAndDispense from './ScanAndDispense';
-import * as api from '../../api/axios';
+import React from "react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { MemoryRouter } from "react-router-dom";
+import ScanAndDispense from "./ScanAndDispense";
+import api from "../../api/axios";
 
-// Mock the API module
-vi.mock('../../api/axios', () => ({
-  default: {
-    get: vi.fn(),
-    post: vi.fn(),
-  },
-  resolvedApiBaseUrl: 'http://localhost:5055',
+vi.mock("../../api/axios", () => ({
+  default: { get: vi.fn(), post: vi.fn() },
+  resolvedApiBaseUrl: "http://localhost:5055",
 }));
 
-// Mock QRScanner component
-vi.mock('../../components/shopkeeper/QRScanner', () => ({
+vi.mock("../../components/shopkeeper/QRScanner", () => ({
   default: ({ onScan }) => (
-    <button onClick={() => onScan(JSON.stringify({
-      rationCardId: 'card-123',
-      sessionId: 'qr-session-456',
-      expiresAt: new Date(Date.now() + 120000).toISOString(),
-    }))}>
+    <button
+      onClick={() =>
+        onScan(
+          JSON.stringify({
+            rationCardId: "card-123",
+            sessionId: "qr-session-456",
+            expiresAt: new Date(Date.now() + 120000).toISOString(),
+          }),
+        )
+      }
+    >
       Mock Scan QR
     </button>
   ),
 }));
 
-// Mock DispenseWeighingPanel component
-vi.mock('../../components/shopkeeper/DispenseWeighingPanel', () => ({
-  default: ({ onDone, commodity, entitledGrams }) => (
-    <div>
-      <p>Weighing {commodity}</p>
-      <p>Target: {entitledGrams}g</p>
-      <button onClick={() => onDone('committed', entitledGrams - 5)}>
-        Simulate Committed
+vi.mock("../../components/shopkeeper/DispenseWeighingPanel", () => ({
+  default: ({ commodity, entitledGrams, onDone }) => (
+    <section>
+      <h2>Live {commodity} scale</h2>
+      <p>Live target: {entitledGrams} g</p>
+      <button onClick={() => onDone("captured", entitledGrams - 5)}>
+        Finish {commodity}
       </button>
-      <button onClick={() => onDone('cancelled', null)}>
-        Simulate Cancelled
-      </button>
-    </div>
+      <button onClick={() => onDone("cancelled", null)}>Cancel weighing</button>
+    </section>
   ),
 }));
 
-// Mock useToast
-vi.mock('../../components/ui/useToast', () => ({
-  default: () => ({
-    success: vi.fn(),
-    danger: vi.fn(),
-    warning: vi.fn(),
-  }),
+vi.mock("../../components/ui/useToast", () => ({
+  default: () => ({ success: vi.fn(), danger: vi.fn(), warning: vi.fn() }),
 }));
 
-const mockBeneficiaryData = {
+const beneficiaryData = {
   beneficiary: {
-    name: 'Test Beneficiary',
-    card_number: 'CARD123456',
-    category: 'BPL',
-    mobile: '9876543210',
+    name: "Test Beneficiary",
+    card_number: "CARD123456",
+    category: "BPL",
     family_size: 4,
-    shop_name: 'Test Shop',
-    ration_card_id: 'card-123',
+    shop_name: "Test Shop",
+    ration_card_id: "card-123",
   },
-  wallet: {
-    rice_balance_kg: 3,
-    wheat_balance_kg: 2,
-  },
-  allocation: {
-    rice_kg: 3,
-    wheat_kg: 2,
-    rice_grams: 3000,
-    wheat_grams: 2000,
-  },
+  wallet: { rice_balance_kg: 3, wheat_balance_kg: 2 },
+  allocation: { rice_kg: 3, wheat_kg: 2, rice_grams: 3000, wheat_grams: 2000 },
 };
 
-const mockDeviceStatus = {
+let readingSequence = 0;
+const deviceStatus = () => ({
   active: true,
-  connectivity: 'online',
-  device_id: 'device-001',
+  connectivity: "online",
+  current_weight_grams: 0,
+  current_weight_at: new Date(Date.now() + ++readingSequence).toISOString(),
+});
+
+const renderPage = () =>
+  render(
+    <MemoryRouter>
+      <ScanAndDispense />
+    </MemoryRouter>,
+  );
+
+const scanBeneficiary = async (user) => {
+  renderPage();
+  await user.click(screen.getByRole("button", { name: "Mock Scan QR" }));
+  await screen.findByText("Test Beneficiary");
 };
 
-beforeEach(() => {
-  // Mock device status polling
-  api.default.get.mockImplementation((url) => {
-    if (url === '/api/dispense/device-status') {
-      return Promise.resolve({ data: mockDeviceStatus });
-    }
-    if (url.includes('/api/shopkeeper/beneficiary/')) {
-      return Promise.resolve({ data: mockBeneficiaryData });
-    }
-    return Promise.reject(new Error('Unknown endpoint'));
-  });
-});
+const createSessionResponse = (url, body) => {
+  if (url === "/api/dispense/session") {
+    return Promise.resolve({
+      data: {
+        session_id: `session-${body.commodity}`,
+        session_jwt: "session-token",
+        tolerance_grams: body.commodity === "rice" ? 30 : 20,
+      },
+    });
+  }
+  if (url.includes("/attach"))
+    return Promise.resolve({ data: { state: "attached" } });
+  if (url.includes("/capture"))
+    return Promise.resolve({ data: { state: "captured" } });
+  if (url === "/api/shopkeeper/dispense")
+    return Promise.resolve({
+      data: {
+        message: "Dispensed successfully",
+        transaction: { id: "tx-final" },
+        dispensed: { rice_qty_kg: 3, wheat_qty_kg: 2 },
+      },
+    });
+  if (url.includes("/cancel"))
+    return Promise.resolve({ data: { state: "cancelled" } });
+  return Promise.reject(new Error(`Unexpected endpoint ${url}`));
+};
 
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  readingSequence = 0;
 });
 
-const renderWithRouter = (component) => {
-  return render(<MemoryRouter>{component}</MemoryRouter>);
-};
-
-describe('ScanAndDispense - Sequential Workflow', () => {
-  it('renders scanner initially', () => {
-    renderWithRouter(<ScanAndDispense />);
-    expect(screen.getByText('Scan & Dispense')).toBeInTheDocument();
-    expect(screen.getByText('Mock Scan QR')).toBeInTheDocument();
-  });
-
-  it('loads beneficiary after QR scan', async () => {
+describe("Phase 1 shopkeeper measurement flow", () => {
+  it("uses the server allocation and attaches an authorized session for the first commodity", async () => {
     const user = userEvent.setup();
-    renderWithRouter(<ScanAndDispense />);
+    api.get.mockImplementation((url) =>
+      Promise.resolve({
+        data:
+          url === "/api/shopkeeper/beneficiary/card-123"
+            ? beneficiaryData
+            : deviceStatus(),
+      }),
+    );
+    api.post.mockImplementation(createSessionResponse);
 
-    const scanButton = screen.getByText('Mock Scan QR');
-    await user.click(scanButton);
+    await scanBeneficiary(user);
+    await user.click(
+      await screen.findByRole("button", { name: /Start rice weighing/i }),
+    );
 
-    await waitFor(() => {
-      expect(screen.getByText('Test Beneficiary')).toBeInTheDocument();
+    expect(await screen.findByText("Live rice scale")).toBeInTheDocument();
+    expect(api.post).toHaveBeenCalledWith("/api/dispense/session", {
+      ration_card_id: "card-123",
+      commodity: "rice",
+      entitled_grams: 3000,
+      qr_session_id: "qr-session-456",
     });
-
-    expect(screen.getByText(/Card: CARD123456/)).toBeInTheDocument();
-    expect(screen.getByText('Step 1: Rice Weighing (3 kg)')).toBeInTheDocument();
-    expect(screen.getByText('Step 2: Wheat Weighing (2 kg)')).toBeInTheDocument();
-  });
-
-  it('shows IoT scale status badge', async () => {
-    const user = userEvent.setup();
-    renderWithRouter(<ScanAndDispense />);
-
-    await user.click(screen.getByText('Mock Scan QR'));
-
-    await waitFor(() => {
-      expect(screen.getByText('IoT Scale')).toBeInTheDocument();
-    });
-
-    expect(screen.getByText('Online')).toBeInTheDocument();
-  });
-
-  it('disables wheat button until rice is completed', async () => {
-    const user = userEvent.setup();
-    renderWithRouter(<ScanAndDispense />);
-
-    await user.click(screen.getByText('Mock Scan QR'));
-
-    await waitFor(() => {
-      expect(screen.getByText('Step 1: Rice Weighing (3 kg)')).toBeInTheDocument();
-    });
-
-    const riceButton = screen.getByRole('button', { name: /Weigh Rice/i });
-    const wheatButton = screen.getByRole('button', { name: /Weigh Wheat/i });
-
-    expect(riceButton).not.toBeDisabled();
-    expect(wheatButton).toBeDisabled();
-    expect(wheatButton).toHaveAttribute('title', 'Complete Rice weighing first');
-  });
-
-  it('starts rice weighing session when Weigh Rice is clicked', async () => {
-    const user = userEvent.setup();
-    api.default.post.mockImplementation((url) => {
-      if (url === '/api/dispense/session') {
-        return Promise.resolve({
-          data: {
-            session_id: 'rice-session-789',
-            session_jwt: 'mock-jwt-token',
-            tolerance_grams: 30,
-          },
-        });
-      }
-      if (url.includes('/attach')) {
-        return Promise.resolve({ data: { session_id: 'rice-session-789' } });
-      }
-      return Promise.reject(new Error('Unknown endpoint'));
-    });
-
-    renderWithRouter(<ScanAndDispense />);
-
-    await user.click(screen.getByText('Mock Scan QR'));
-
-    await waitFor(() => {
-      expect(screen.getByRole('button', { name: /Weigh Rice/i })).toBeInTheDocument();
-    });
-
-    await user.click(screen.getByRole('button', { name: /Weigh Rice/i }));
-
-    await waitFor(() => {
-      expect(api.default.post).toHaveBeenCalledWith('/api/dispense/session', {
-        ration_card_id: 'card-123',
-        commodity: 'rice',
-        entitled_grams: 3000,
-        qr_session_id: 'qr-session-456',
-      });
-    });
-
-    await waitFor(() => {
-      expect(screen.getByText('Weighing rice')).toBeInTheDocument();
-      expect(screen.getByText('Target: 3000g')).toBeInTheDocument();
-    });
-  });
-
-  it('records measured grams and shows verified badge after rice is committed', async () => {
-    const user = userEvent.setup();
-    api.default.post.mockResolvedValue({
-      data: {
-        session_id: 'rice-session-789',
-        session_jwt: 'mock-jwt',
-        tolerance_grams: 30,
+    expect(api.post).toHaveBeenCalledWith(
+      "/api/dispense/session/session-rice/attach",
+      {
+        session_jwt: "session-token",
       },
-    });
-
-    renderWithRouter(<ScanAndDispense />);
-
-    await user.click(screen.getByText('Mock Scan QR'));
-    await waitFor(() => {
-      expect(screen.getByRole('button', { name: /Weigh Rice/i })).toBeInTheDocument();
-    });
-
-    await user.click(screen.getByRole('button', { name: /Weigh Rice/i }));
-
-    await waitFor(() => {
-      expect(screen.getByText('Simulate Committed')).toBeInTheDocument();
-    });
-
-    await user.click(screen.getByText('Simulate Committed'));
-
-    await waitFor(() => {
-      expect(screen.getByText(/✓ Measured: 2995 g/)).toBeInTheDocument();
-    });
-
-    expect(screen.getByText('Verified')).toBeInTheDocument();
+    );
   });
 
-  it('enables wheat button after rice is verified', async () => {
+  it("freezes a capture, verifies empty-pan reset, advances to wheat, and finalizes automatically after the last commodity", async () => {
     const user = userEvent.setup();
-    api.default.post.mockResolvedValue({
-      data: {
-        session_id: 'session-id',
-        session_jwt: 'mock-jwt',
-        tolerance_grams: 30,
-      },
-    });
+    api.get.mockImplementation((url) =>
+      Promise.resolve({
+        data:
+          url === "/api/shopkeeper/beneficiary/card-123"
+            ? beneficiaryData
+            : deviceStatus(),
+      }),
+    );
+    api.post.mockImplementation(createSessionResponse);
 
-    renderWithRouter(<ScanAndDispense />);
+    await scanBeneficiary(user);
+    await user.click(
+      await screen.findByRole("button", { name: /Start rice weighing/i }),
+    );
+    await user.click(
+      await screen.findByRole("button", { name: "Finish rice" }),
+    );
 
-    await user.click(screen.getByText('Mock Scan QR'));
-    await user.click(await screen.findByRole('button', { name: /Weigh Rice/i }));
-    await user.click(await screen.findByText('Simulate Committed'));
+    expect(
+      await screen.findByText("Clear and zero the scale"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("2,995 g")).toBeInTheDocument();
 
-    await waitFor(() => {
-      const wheatButton = screen.getByRole('button', { name: /Weigh Wheat/i });
-      expect(wheatButton).not.toBeDisabled();
-    });
+    const startWheat = await screen.findByRole(
+      "button",
+      { name: /Ready to weigh wheat/i },
+      { timeout: 5000 },
+    );
+    await waitFor(() => expect(startWheat).toBeEnabled(), { timeout: 5000 });
+    await user.click(startWheat);
+    await user.click(
+      await screen.findByRole("button", { name: /Start wheat weighing/i }),
+    );
+    await user.click(
+      await screen.findByRole("button", { name: "Finish wheat" }),
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "Measurement review" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("2,995 g")).toBeInTheDocument();
+    expect(screen.getByText("1,995 g")).toBeInTheDocument();
+    expect(api.post).toHaveBeenCalledWith(
+      "/api/shopkeeper/dispense",
+      expect.objectContaining({
+        ration_card_id: "card-123",
+        session_id: "qr-session-456",
+        rice_session_id: "session-rice",
+        wheat_session_id: "session-wheat",
+      }),
+    );
   });
 
-  it('shows transaction summary card when both commodities are weighed', async () => {
+  it("does not advance or mark a commodity complete when its weighing is cancelled", async () => {
     const user = userEvent.setup();
-    api.default.post.mockResolvedValue({
-      data: { session_id: 'session', session_jwt: 'jwt', tolerance_grams: 30 },
-    });
+    api.get.mockImplementation((url) =>
+      Promise.resolve({
+        data:
+          url === "/api/shopkeeper/beneficiary/card-123"
+            ? beneficiaryData
+            : deviceStatus(),
+      }),
+    );
+    api.post.mockImplementation(createSessionResponse);
 
-    renderWithRouter(<ScanAndDispense />);
+    await scanBeneficiary(user);
+    await user.click(
+      await screen.findByRole("button", { name: /Start rice weighing/i }),
+    );
+    await user.click(
+      await screen.findByRole("button", { name: "Cancel weighing" }),
+    );
 
-    await user.click(screen.getByText('Mock Scan QR'));
-
-    // Complete rice
-    await user.click(await screen.findByRole('button', { name: /Weigh Rice/i }));
-    await user.click(await screen.findByText('Simulate Committed'));
-
-    // Complete wheat
-    await waitFor(() => {
-      expect(screen.getByRole('button', { name: /Weigh Wheat/i })).not.toBeDisabled();
-    });
-    await user.click(screen.getByRole('button', { name: /Weigh Wheat/i }));
-    await user.click(await screen.findByText('Simulate Committed'));
-
-    await waitFor(() => {
-      expect(screen.getByText('Transaction Summary')).toBeInTheDocument();
-    });
-
-    // Check within the transaction summary card
-    const summaryCard = screen.getByText('Transaction Summary').closest('div');
-    expect(summaryCard).toHaveTextContent('2995 g');
-    expect(summaryCard).toHaveTextContent('1995 g');
-  });
-
-  it('disables Complete Transaction button until both commodities are weighed', async () => {
-    const user = userEvent.setup();
-    renderWithRouter(<ScanAndDispense />);
-
-    await user.click(screen.getByText('Mock Scan QR'));
-
-    await waitFor(() => {
-      const completeButton = screen.getByRole('button', { name: /Complete Transaction/i });
-      expect(completeButton).toBeDisabled();
-    });
-  });
-
-  it('enables Complete Transaction button when both commodities are verified', async () => {
-    const user = userEvent.setup();
-    api.default.post.mockResolvedValue({
-      data: { session_id: 'session', session_jwt: 'jwt', tolerance_grams: 30 },
-    });
-
-    renderWithRouter(<ScanAndDispense />);
-
-    await user.click(screen.getByText('Mock Scan QR'));
-    await user.click(await screen.findByRole('button', { name: /Weigh Rice/i }));
-    await user.click(await screen.findByText('Simulate Committed'));
-    await user.click(await screen.findByRole('button', { name: /Weigh Wheat/i }));
-    await user.click(await screen.findByText('Simulate Committed'));
-
-    await waitFor(() => {
-      const completeButton = screen.getByRole('button', { name: /Complete Transaction/i });
-      expect(completeButton).not.toBeDisabled();
-    });
-  });
-
-  it('shows confirmation modal with measured grams when Complete Transaction is clicked', async () => {
-    const user = userEvent.setup();
-    api.default.post.mockResolvedValue({
-      data: { session_id: 'session', session_jwt: 'jwt', tolerance_grams: 30 },
-    });
-
-    renderWithRouter(<ScanAndDispense />);
-
-    await user.click(screen.getByText('Mock Scan QR'));
-    await user.click(await screen.findByRole('button', { name: /Weigh Rice/i }));
-    await user.click(await screen.findByText('Simulate Committed'));
-    await user.click(await screen.findByRole('button', { name: /Weigh Wheat/i }));
-    await user.click(await screen.findByText('Simulate Committed'));
-    await user.click(await screen.findByRole('button', { name: /Complete Transaction/i }));
-
-    await waitFor(() => {
-      expect(screen.getByRole('heading', { name: /Confirm Transaction/i })).toBeInTheDocument();
-    });
-
-    expect(screen.getByText(/2995 g \(3 kg\)/)).toBeInTheDocument();
-    expect(screen.getByText(/1995 g \(2 kg\)/)).toBeInTheDocument();
-  });
-
-  it('calls dispense API with both session IDs when transaction is confirmed', async () => {
-    const user = userEvent.setup();
-    let sessionCounter = 0;
-    api.default.post.mockImplementation((url, data) => {
-      if (url === '/api/dispense/session') {
-        sessionCounter++;
-        return Promise.resolve({
-          data: {
-            session_id: `session-${sessionCounter}`,
-            session_jwt: 'jwt',
-            tolerance_grams: 30,
-          },
-        });
-      }
-      if (url.includes('/attach')) {
-        return Promise.resolve({ data: {} });
-      }
-      if (url === '/api/shopkeeper/dispense') {
-        return Promise.resolve({
-          data: {
-            transaction: { id: 'tx-123', created_at: new Date().toISOString() },
-            dispensed: { rice_qty_kg: 3, wheat_qty_kg: 2 },
-            remaining_wallet: { rice_balance_kg: 0, wheat_balance_kg: 0 },
-          },
-        });
-      }
-      return Promise.reject(new Error('Unknown endpoint'));
-    });
-
-    renderWithRouter(<ScanAndDispense />);
-
-    await user.click(screen.getByText('Mock Scan QR'));
-    await user.click(await screen.findByRole('button', { name: /Weigh Rice/i }));
-    await user.click(await screen.findByText('Simulate Committed'));
-    await user.click(await screen.findByRole('button', { name: /Weigh Wheat/i }));
-    await user.click(await screen.findByText('Simulate Committed'));
-    await user.click(await screen.findByRole('button', { name: /Complete Transaction/i }));
-
-    const confirmButton = await screen.findByRole('button', { name: /Confirm & Complete/i });
-    await user.click(confirmButton);
-
-    await waitFor(() => {
-      expect(api.default.post).toHaveBeenCalledWith('/api/shopkeeper/dispense', {
-        ration_card_id: 'card-123',
-        session_id: 'qr-session-456',
-        rice_session_id: 'session-1',
-        wheat_session_id: 'session-2',
-        rice_qty_kg: 3,
-        wheat_qty_kg: 2,
-      });
-    });
-  });
-
-  it('shows success modal with beneficiary name, measured grams, and transaction ID', async () => {
-    const user = userEvent.setup();
-    let sessionCounter = 0;
-    api.default.post.mockImplementation((url) => {
-      if (url === '/api/dispense/session') {
-        sessionCounter++;
-        return Promise.resolve({
-          data: { session_id: `session-${sessionCounter}`, session_jwt: 'jwt', tolerance_grams: 30 },
-        });
-      }
-      if (url.includes('/attach')) {
-        return Promise.resolve({ data: {} });
-      }
-      if (url === '/api/shopkeeper/dispense') {
-        return Promise.resolve({
-          data: {
-            transaction: { id: 'tx-success-123', created_at: new Date().toISOString() },
-            dispensed: { rice_qty_kg: 3, wheat_qty_kg: 2 },
-            remaining_wallet: { rice_balance_kg: 0, wheat_balance_kg: 0 },
-          },
-        });
-      }
-      return Promise.reject(new Error('Unknown'));
-    });
-
-    renderWithRouter(<ScanAndDispense />);
-
-    await user.click(screen.getByText('Mock Scan QR'));
-    await user.click(await screen.findByRole('button', { name: /Weigh Rice/i }));
-    await user.click(await screen.findByText('Simulate Committed'));
-    await user.click(await screen.findByRole('button', { name: /Weigh Wheat/i }));
-    await user.click(await screen.findByText('Simulate Committed'));
-    await user.click(await screen.findByRole('button', { name: /Complete Transaction/i }));
-    await user.click(await screen.findByRole('button', { name: /Confirm & Complete/i }));
-
-    await waitFor(() => {
-      expect(screen.getByRole('heading', { name: /Transaction Completed/i })).toBeInTheDocument();
-    });
-
-    expect(screen.getByText('Test Beneficiary')).toBeInTheDocument();
-    expect(screen.getByText(/2995 g/)).toBeInTheDocument();
-    expect(screen.getByText(/1995 g/)).toBeInTheDocument();
-    expect(screen.getByText(/ID: tx-success-123/)).toBeInTheDocument();
-    expect(screen.getByText(/Blockchain: Anchoring initiated/)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Scan Next Beneficiary/i })).toBeInTheDocument();
-  });
-
-  it('does not show success modal if transaction API fails', async () => {
-    const user = userEvent.setup();
-    api.default.post.mockImplementation((url) => {
-      if (url === '/api/dispense/session') {
-        return Promise.resolve({
-          data: { session_id: 'session', session_jwt: 'jwt', tolerance_grams: 30 },
-        });
-      }
-      if (url.includes('/attach')) {
-        return Promise.resolve({ data: {} });
-      }
-      if (url === '/api/shopkeeper/dispense') {
-        return Promise.reject({ response: { data: { error: 'Insufficient balance' } } });
-      }
-      return Promise.reject(new Error('Unknown'));
-    });
-
-    renderWithRouter(<ScanAndDispense />);
-
-    await user.click(screen.getByText('Mock Scan QR'));
-    await user.click(await screen.findByRole('button', { name: /Weigh Rice/i }));
-    await user.click(await screen.findByText('Simulate Committed'));
-    await user.click(await screen.findByRole('button', { name: /Weigh Wheat/i }));
-    await user.click(await screen.findByText('Simulate Committed'));
-    await user.click(await screen.findByRole('button', { name: /Complete Transaction/i }));
-    await user.click(await screen.findByRole('button', { name: /Confirm & Complete/i }));
-
-    await waitFor(() => {
-      expect(screen.queryByRole('heading', { name: /Transaction Completed/i })).not.toBeInTheDocument();
-    });
+    expect(
+      await screen.findByRole("button", { name: /Start rice weighing/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Clear and zero the scale"),
+    ).not.toBeInTheDocument();
+    expect(api.post).not.toHaveBeenCalledWith(
+      expect.stringMatching(/\/capture$/),
+      expect.anything(),
+    );
   });
 });

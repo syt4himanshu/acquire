@@ -130,7 +130,14 @@ class Bridge extends EventEmitter {
                     );
                 }
 
-                this.client.sendReading(message.grams);
+                const forwarded = this.client.sendReading(message.grams);
+                if (forwarded) {
+                    // Log every successful forward for debugging, but at debug level
+                    // to avoid flooding the console at 1 Hz
+                    logger.debug(`Reading forwarded: ${message.grams} g`);
+                } else {
+                    logger.warn(`Reading dropped (backend disconnected): ${message.grams} g`);
+                }
                 this.emit("reading", message.grams);
                 return;
 

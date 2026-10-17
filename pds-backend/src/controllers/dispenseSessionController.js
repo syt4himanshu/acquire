@@ -5,101 +5,160 @@ const auditLogService = require("../services/auditLogService");
 const deviceFleetService = require("../services/deviceFleetService");
 const { getAssignedShop } = require("./shopkeeperController");
 
-const sendServiceError = (res, result) => res.status(result.status || 400).json({ error: result.message, code: result.code });
+const sendServiceError = (res, result) =>
+  res
+    .status(result.status || 400)
+    .json({ error: result.message, code: result.code });
 
 // POST /api/dispense/session
 const createSession = async (req, res, next) => {
-    try {
-        const shop = await getAssignedShop(pool, req.user.id);
-        if (!shop) {
-            return res.status(404).json({ error: "No active shop assigned" });
-        }
-
-        const {
-            ration_card_id: rationCardId,
-            commodity,
-            entitled_grams: entitledGrams,
-            qr_session_id: qrSessionId,
-        } = req.body;
-
-        const result = await dispenseSessionService.createSession({
-            shopId: shop.id,
-            rationCardId,
-            commodity,
-            entitledGrams,
-            qrSessionId,
-        });
-
-        if (!result.ok) {
-            logger.warn("[IoT] createSession rejected", { shopId: shop.id, code: result.code });
-            return sendServiceError(res, result);
-        }
-
-        return res.status(201).json({
-            session_id: result.sessionId,
-            session_jwt: result.sessionJwt,
-            expires_at: result.expiresAt,
-            tolerance_grams: result.toleranceGrams,
-        });
-    } catch (err) {
-        return next(err);
+  try {
+    const shop = await getAssignedShop(pool, req.user.id);
+    if (!shop) {
+      return res.status(404).json({ error: "No active shop assigned" });
     }
+
+    const {
+      ration_card_id: rationCardId,
+      commodity,
+      entitled_grams: entitledGrams,
+      qr_session_id: qrSessionId,
+    } = req.body;
+
+    const result = await dispenseSessionService.createSession({
+      shopId: shop.id,
+      rationCardId,
+      commodity,
+      entitledGrams,
+      qrSessionId,
+    });
+
+    if (!result.ok) {
+      logger.warn("[IoT] createSession rejected", {
+        shopId: shop.id,
+        code: result.code,
+      });
+      return sendServiceError(res, result);
+    }
+
+    return res.status(201).json({
+      session_id: result.sessionId,
+      session_jwt: result.sessionJwt,
+      expires_at: result.expiresAt,
+      tolerance_grams: result.toleranceGrams,
+    });
+  } catch (err) {
+    return next(err);
+  }
 };
 
 // POST /api/dispense/session/:id/attach
 const attachSession = async (req, res, next) => {
-    try {
-        const shop = await getAssignedShop(pool, req.user.id);
-        if (!shop) {
-            return res.status(404).json({ error: "No active shop assigned" });
-        }
-
-        const { session_jwt: sessionJwt } = req.body;
-        const result = await dispenseSessionService.attachSession(req.params.id, sessionJwt, shop.id);
-
-        if (!result.ok) {
-            return sendServiceError(res, result);
-        }
-
-        return res.status(200).json({
-            session_id: result.sessionId,
-            device_id: result.deviceId,
-            state: result.state,
-        });
-    } catch (err) {
-        return next(err);
+  try {
+    const shop = await getAssignedShop(pool, req.user.id);
+    if (!shop) {
+      return res.status(404).json({ error: "No active shop assigned" });
     }
+
+    const { session_jwt: sessionJwt } = req.body;
+    const result = await dispenseSessionService.attachSession(
+      req.params.id,
+      sessionJwt,
+      shop.id,
+    );
+
+    if (!result.ok) {
+      return sendServiceError(res, result);
+    }
+
+    return res.status(200).json({
+      session_id: result.sessionId,
+      device_id: result.deviceId,
+      state: result.state,
+    });
+  } catch (err) {
+    return next(err);
+  }
 };
 
 // POST /api/dispense/session/:id/cancel
 const cancelSession = async (req, res, next) => {
-    try {
-        const shop = await getAssignedShop(pool, req.user.id);
-        if (!shop) {
-            return res.status(404).json({ error: "No active shop assigned" });
-        }
-
-        const result = await dispenseSessionService.cancelSession(req.params.id, shop.id);
-        if (!result.ok) {
-            return sendServiceError(res, result);
-        }
-
-        logger.info("[IoT] Dispense session cancelled by shopkeeper", {
-            shopId: shop.id,
-            sessionId: req.params.id,
-        });
-        auditLogService.record({
-            actorType: "shopkeeper",
-            actorId: req.user?.id,
-            action: "cancel_session",
-            target: req.params.id,
-            meta: { shopId: shop.id },
-        });
-
-        return res.status(200).json({ session_id: result.sessionId, state: result.state });
-    } catch (err) {
-        return next(err);
+  try {
+    const shop = await getAssignedShop(pool, req.user.id);
+    if (!shop) {
+      return res.status(404).json({ error: "No active shop assigned" });
     }
+
+    const result = await dispenseSessionService.cancelSession(
+      req.params.id,
+      shop.id,
+    );
+    if (!result.ok) {
+      return sendServiceError(res, result);
+    }
+
+    logger.info("[IoT] Dispense session cancelled by shopkeeper", {
+      shopId: shop.id,
+      sessionId: req.params.id,
+    });
+    await auditLogService.record({
+      actorType: "shopkeeper",
+      actorId: req.user?.id,
+      action: "cancel_session",
+      target: req.params.id,
+      meta: { shopId: shop.id },
+    });
+
+    return res
+      .status(200)
+      .json({ session_id: result.sessionId, state: result.state });
+  } catch (err) {
+    return next(err);
+  }
+};
+
+// POST /api/dispense/session/:id/capture — freezes a validated Phase 1 reading
+// and closes the measurement session without creating a dispense transaction.
+const captureMeasurement = async (req, res, next) => {
+  try {
+    const shop = await getAssignedShop(pool, req.user.id);
+    if (!shop) {
+      return res.status(404).json({ error: "No active shop assigned" });
+    }
+
+    const result = await dispenseSessionService.captureMeasurement(
+      req.params.id,
+      shop.id,
+    );
+    if (!result.ok) {
+      return sendServiceError(res, result);
+    }
+
+    auditLogService.record({
+      actorType: "shopkeeper",
+      actorId: req.user?.id,
+      action: "capture_measurement",
+      target: req.params.id,
+      meta: {
+        shopId: shop.id,
+        commodity: result.commodity,
+        entitledGrams: result.entitledGrams,
+        toleranceGrams: result.toleranceGrams,
+        measuredGrams: result.measuredGrams,
+      },
+    });
+
+    return res.status(200).json({
+      session_id: result.sessionId,
+      state: "captured",
+      commodity: result.commodity,
+      entitled_grams: result.entitledGrams,
+      tolerance_grams: result.toleranceGrams,
+      measured_grams: result.measuredGrams,
+    });
+  } catch (err) {
+    return next(err);
+  }
 };
 
 // POST /api/dispense/session/:id/confirm
@@ -109,32 +168,35 @@ const cancelSession = async (req, res, next) => {
 // stable weight). The measured grams are derived from the average of the
 // backend's stability window — the same calculation the auto-timer uses.
 const confirmSession = async (req, res, next) => {
-    try {
-        const shop = await getAssignedShop(pool, req.user.id);
-        if (!shop) {
-            return res.status(404).json({ error: "No active shop assigned" });
-        }
-
-        const result = await dispenseSessionService.manualConfirm(req.params.id, shop.id);
-        if (!result.ok) {
-            return sendServiceError(res, result);
-        }
-
-        logger.info("[IoT] Dispense session manually confirmed by shopkeeper", {
-            shopId: shop.id,
-            sessionId: req.params.id,
-            measuredGrams: result.measuredGrams,
-        });
-
-        return res.status(200).json({
-            session_id: result.sessionId,
-            state: result.state,
-            measured_grams: result.measuredGrams,
-            dispense_record_id: result.dispenseRecordId,
-        });
-    } catch (err) {
-        return next(err);
+  try {
+    const shop = await getAssignedShop(pool, req.user.id);
+    if (!shop) {
+      return res.status(404).json({ error: "No active shop assigned" });
     }
+
+    const result = await dispenseSessionService.manualConfirm(
+      req.params.id,
+      shop.id,
+    );
+    if (!result.ok) {
+      return sendServiceError(res, result);
+    }
+
+    logger.info("[IoT] Dispense session manually confirmed by shopkeeper", {
+      shopId: shop.id,
+      sessionId: req.params.id,
+      measuredGrams: result.measuredGrams,
+    });
+
+    return res.status(200).json({
+      session_id: result.sessionId,
+      state: result.state,
+      measured_grams: result.measuredGrams,
+      dispense_record_id: result.dispenseRecordId,
+    });
+  } catch (err) {
+    return next(err);
+  }
 };
 
 // GET /api/dispense/device-status — lets the shopkeeper's dispense screen
@@ -150,14 +212,14 @@ const confirmSession = async (req, res, next) => {
 // The response deliberately contains no token, no COM port and no serial
 // detail. The shopkeeper does not configure hardware; they weigh grain.
 const getDeviceStatus = async (req, res, next) => {
-    try {
-        const shop = await getAssignedShop(pool, req.user.id);
-        if (!shop) {
-            return res.status(404).json({ error: "No active shop assigned" });
-        }
+  try {
+    const shop = await getAssignedShop(pool, req.user.id);
+    if (!shop) {
+      return res.status(404).json({ error: "No active shop assigned" });
+    }
 
-        const result = await pool.query(
-            `SELECT d.device_id, d.device_name, d.last_seen_at,
+    const result = await pool.query(
+      `SELECT d.device_id, d.device_name, d.last_seen_at,
               r.grams_int AS current_weight_grams, r.taken_at AS current_weight_at
          FROM iot_devices d
          LEFT JOIN LATERAL (
@@ -167,47 +229,60 @@ const getDeviceStatus = async (req, res, next) => {
          ) r ON true
         WHERE d.shop_id = $1 AND d.status = 'active'
         LIMIT 1`,
-            [shop.id],
-        );
+      [shop.id],
+    );
 
-        const device = result.rows[0] || null;
+    const device = result.rows[0] || null;
 
-        return res.status(200).json({
-            active: Boolean(device),
-            device_id: device?.device_id || null,
-            device_name: device?.device_name || null,
-            connectivity: device ? deviceFleetService.deriveStatus(device.device_id, device.last_seen_at) : "offline",
-            last_seen_at: device?.last_seen_at || null,
-            // Current SENSOR reading, not a dispense. Displaying it can never
-            // debit a wallet — only commitSession does that, and only for an
-            // authorised session.
-            current_weight_grams: device?.current_weight_grams ?? null,
-            current_weight_at: device?.current_weight_at || null,
-        });
-    } catch (err) {
-        return next(err);
-    }
+    return res.status(200).json({
+      active: Boolean(device),
+      device_id: device?.device_id || null,
+      device_name: device?.device_name || null,
+      connectivity: device
+        ? deviceFleetService.deriveStatus(device.device_id, device.last_seen_at)
+        : "offline",
+      last_seen_at: device?.last_seen_at || null,
+      // Current SENSOR reading, not a dispense. Displaying it can never
+      // debit a wallet — only commitSession does that, and only for an
+      // authorised session.
+      current_weight_grams: device?.current_weight_grams ?? null,
+      current_weight_at: device?.current_weight_at || null,
+    });
+  } catch (err) {
+    return next(err);
+  }
 };
 
 // GET /api/dispense/session/:id
 const getSession = async (req, res, next) => {
-    try {
-        const shop = await getAssignedShop(pool, req.user.id);
-        if (!shop) {
-            return res.status(404).json({ error: "No active shop assigned" });
-        }
-
-        await dispenseSessionService.expireIfStale(req.params.id);
-
-        const result = await dispenseSessionService.getSessionStatus(req.params.id, shop.id);
-        if (!result.ok) {
-            return sendServiceError(res, result);
-        }
-
-        return res.status(200).json({ session: result.session });
-    } catch (err) {
-        return next(err);
+  try {
+    const shop = await getAssignedShop(pool, req.user.id);
+    if (!shop) {
+      return res.status(404).json({ error: "No active shop assigned" });
     }
+
+    await dispenseSessionService.expireIfStale(req.params.id);
+
+    const result = await dispenseSessionService.getSessionStatus(
+      req.params.id,
+      shop.id,
+    );
+    if (!result.ok) {
+      return sendServiceError(res, result);
+    }
+
+    return res.status(200).json({ session: result.session });
+  } catch (err) {
+    return next(err);
+  }
 };
 
-module.exports = { createSession, attachSession, cancelSession, confirmSession, getSession, getDeviceStatus };
+module.exports = {
+  createSession,
+  attachSession,
+  cancelSession,
+  captureMeasurement,
+  confirmSession,
+  getSession,
+  getDeviceStatus,
+};

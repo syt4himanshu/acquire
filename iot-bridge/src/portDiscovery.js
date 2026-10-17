@@ -59,6 +59,26 @@ const describePorts = (ports) =>
 const likelyEsp32Ports = (ports) => describePorts(ports).filter((port) => port.isLikelyEsp32);
 
 /**
+ * Normalises a serial port path for matching.
+ * 
+ * On macOS, each USB serial device appears as BOTH /dev/cu.xxx and /dev/tty.xxx:
+ *   - /dev/cu.xxx — callout device (non-blocking, preferred for dialout)
+ *   - /dev/tty.xxx — terminal device (blocking I/O)
+ * 
+ * The operator typically configures /dev/cu.xxx (the recommended device), but
+ * SerialPort.list() returns /dev/tty.xxx. This normalises both to the same
+ * canonical form so they match.
+ * 
+ * Windows COM ports and Linux /dev/ttyUSB* are passed through unchanged.
+ */
+const normalisePortPath = (path) => {
+    if (!path) return "";
+    const lower = String(path).trim().toLowerCase();
+    // Replace /dev/cu. with /dev/tty. so cu and tty variants match
+    return lower.replace(/^\/dev\/cu\./, "/dev/tty.");
+};
+
+/**
  * Decides which port to open.
  *
  * @param {object} params
@@ -74,10 +94,11 @@ const resolvePort = ({ configuredPath, ports }) => {
     const described = describePorts(ports);
 
     if (configuredPath) {
-        // Case-insensitive because Windows accepts "com5" but SerialPort.list()
-        // reports "COM5".
-        const wanted = String(configuredPath).trim().toLowerCase();
-        const match = described.find((port) => port.path.toLowerCase() === wanted);
+        // Normalised matching handles:
+        //   - Case differences (Windows accepts "com5" but list() reports "COM5")
+        //   - macOS cu/tty duality (/dev/cu.xxx in .env matches /dev/tty.xxx from list())
+        const wanted = normalisePortPath(configuredPath);
+        const match = described.find((port) => normalisePortPath(port.path) === wanted);
 
         if (match) {
             return {
@@ -135,10 +156,10 @@ const resolvePort = ({ configuredPath, ports }) => {
         code: "NOT_FOUND",
         message: described.length
             ? "No recognised ESP32/USB-serial device found. Present ports: " +
-              described.map((p) => `${p.path}${p.friendlyName ? ` (${p.friendlyName})` : ""}`).join(", ") +
-              ". If one of those IS the board, set IOT_SERIAL_PORT to it in iot-bridge/.env."
+            described.map((p) => `${p.path}${p.friendlyName ? ` (${p.friendlyName})` : ""}`).join(", ") +
+            ". If one of those IS the board, set IOT_SERIAL_PORT to it in iot-bridge/.env."
             : "No serial ports found. Plug the ESP32 in over USB, and make sure its " +
-              "USB-UART driver (CP210x / CH340 / FTDI) is installed.",
+            "USB-UART driver (CP210x / CH340 / FTDI) is installed.",
         candidates: described,
     };
 };
@@ -159,4 +180,5 @@ module.exports = {
     likelyEsp32Ports,
     resolvePort,
     listSystemPorts,
+    normalisePortPath,
 };
