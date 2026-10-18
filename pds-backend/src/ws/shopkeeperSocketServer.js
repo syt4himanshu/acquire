@@ -2,6 +2,7 @@ const { WebSocketServer } = require("ws");
 const jwt = require("jsonwebtoken");
 const logger = require("../config/logger");
 const dispenseSessionBus = require("../services/dispenseSessionBus");
+const { logStateDelivery } = require("../services/stabilityDebug"); // TEMPORARY
 const { shopkeeperSubscribeFrameSchema } = require("../validators/iotFrames");
 
 const extractSubprotocol = (req) => {
@@ -46,14 +47,32 @@ const createShopkeeperSocketServer = () => {
                 unsubscribe();
             }
 
+            // TEMPORARY diagnostics: state events only.
+            logStateDelivery({ stage: "subscribe_frame", sessionId: value.sessionId, state: null, extra: { shopkeeperId: shopkeeper.id } });
+            logger.info("[WS-DIAG] shopkeeper subscribed", { sessionId: value.sessionId, shopkeeperId: shopkeeper.id });
             unsubscribe = dispenseSessionBus.subscribe(value.sessionId, (payload) => {
+                if (payload.type !== "state") {
+                    if (ws.readyState === ws.OPEN) {
+                        ws.send(JSON.stringify(payload));
+                    }
+                    return;
+                }
                 if (ws.readyState === ws.OPEN) {
+                    logStateDelivery({ stage: "deliver", sessionId: value.sessionId, state: payload.state, extra: { readyState: ws.readyState } });
                     ws.send(JSON.stringify(payload));
+                } else {
+                    logStateDelivery({ stage: "deliver_skipped", sessionId: value.sessionId, state: payload.state, extra: { readyState: ws.readyState } });
                 }
             });
         });
 
-        ws.on("close", () => {
+        ws.on("close", (code, reason) => {
+            // TEMPORARY [WS-DIAG]: close code tells us why the socket ended.
+            logger.info("[WS-DIAG] shopkeeper socket closed", {
+                shopkeeperId: shopkeeper.id,
+                code,
+                reason: reason ? reason.toString() : null,
+            });
             if (unsubscribe) {
                 unsubscribe();
             }
@@ -67,8 +86,15 @@ const createShopkeeperSocketServer = () => {
 
     const handleUpgrade = (req, socket, head) => {
         const token = extractSubprotocol(req);
+        // TEMPORARY [WS-DIAG]: the token itself is never logged, only whether it was sent.
+        logger.info("[WS-DIAG] shopkeeper handshake", {
+            path: req.url,
+            hasSubprotocolToken: Boolean(token),
+            origin: req.headers.origin || null,
+        });
 
         if (!token) {
+            logger.warn("[WS-DIAG] shopkeeper handshake rejected", { reason: "no_token" });
             socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
             socket.destroy();
             return;
@@ -79,6 +105,7 @@ const createShopkeeperSocketServer = () => {
             decoded = jwt.verify(token, process.env.JWT_SECRET);
         } catch (err) {
             logger.warn("[IoT] Rejected shopkeeper WS handshake", { message: err.message });
+            logger.warn("[WS-DIAG] shopkeeper handshake rejected", { reason: "token_invalid", message: err.message });
             socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
             socket.destroy();
             return;
@@ -86,6 +113,7 @@ const createShopkeeperSocketServer = () => {
 
         if (decoded.role !== "shopkeeper") {
             logger.warn("[IoT] Rejected shopkeeper WS handshake: wrong role", { role: decoded.role });
+            logger.warn("[WS-DIAG] shopkeeper handshake rejected", { reason: "wrong_role", role: decoded.role });
             socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
             socket.destroy();
             return;

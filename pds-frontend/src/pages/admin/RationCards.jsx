@@ -113,7 +113,9 @@ const RationCards = () => {
                 <Table.Cell>
                   <Badge status={getCategoryBadgeStatus(card.category)}>{card.category}</Badge>
                 </Table.Cell>
-                <Table.Cell>{card.head_name || '—'}</Table.Cell>
+                <Table.Cell>
+                  {card.head_name || <span className="italic text-text-secondary">Name unavailable</span>}
+                </Table.Cell>
                 <Table.Cell>{card.shop_name || '—'}</Table.Cell>
                 <Table.Cell>{card.area_name || '—'}</Table.Cell>
                 <Table.Cell numeric>{card.family_size ?? '—'}</Table.Cell>

@@ -22,6 +22,7 @@ import Card from "../../components/ui/Card";
 import Skeleton from "../../components/ui/Skeleton";
 import Button from "../../components/ui/Button";
 import Badge from "../../components/ui/Badge";
+import ShopStatusCard from "../../components/shopkeeper/ShopStatusCard";
 
 // Helper to get time-based greeting
 const getGreeting = () => {
@@ -322,6 +323,8 @@ const Dashboard = () => {
           </div>
         </Card>
       </div>
+
+      <ShopStatusCard />
 
       {/* Shop Information Card - Enhanced */}
       <Card>

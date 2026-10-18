@@ -160,6 +160,11 @@ const createRationCard = async (req, res, next) => {
   }
 };
 
+// Audit/E2E fixtures are created with the DEMO-AUDIT-* card number prefix. They
+// are hidden from the admin lists so only real beneficiaries are shown. The rows
+// are kept in the database; this only filters the admin views.
+const EXCLUDE_DEMO_FIXTURES_SQL = "rc.card_number NOT LIKE 'DEMO-AUDIT-%'";
+
 const getBeneficiaries = async (req, res, next) => {
   try {
     const { category, area_id, shop_id } = req.query;
@@ -168,7 +173,7 @@ const getBeneficiaries = async (req, res, next) => {
     const offset = (page - 1) * limit;
 
     const params = [];
-    const filters = [];
+    const filters = [EXCLUDE_DEMO_FIXTURES_SQL];
 
     if (category) {
       params.push(category);
@@ -207,10 +212,10 @@ const getBeneficiaries = async (req, res, next) => {
          a.name AS area_name,
          (SELECT COUNT(*) FROM family_members fm_c WHERE fm_c.ration_card_id = rc.id)::int AS family_size
        FROM ration_cards rc
-       INNER JOIN family_members fm_head ON fm_head.ration_card_id = rc.id AND fm_head.is_head = true
-       INNER JOIN users u  ON u.id  = fm_head.user_id
-       INNER JOIN shops s  ON s.id  = rc.shop_id
-       INNER JOIN areas a  ON a.id  = rc.area_id
+       LEFT JOIN family_members fm_head ON fm_head.ration_card_id = rc.id AND fm_head.is_head = true
+       LEFT JOIN users u  ON u.id  = fm_head.user_id
+       LEFT JOIN shops s  ON s.id  = rc.shop_id
+       LEFT JOIN areas a  ON a.id  = rc.area_id
        ${whereClause}
        ORDER BY rc.created_at DESC
        LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
@@ -232,7 +237,9 @@ const getRationCards = async (req, res, next) => {
     const limit = parseInt(req.query.limit) || 20;
     const offset = (page - 1) * limit;
 
-    const countResult = await pool.query(`SELECT COUNT(*) FROM ration_cards`);
+    const countResult = await pool.query(
+      `SELECT COUNT(*) FROM ration_cards rc WHERE ${EXCLUDE_DEMO_FIXTURES_SQL}`,
+    );
     const total = parseInt(countResult.rows[0].count);
 
     const result = await pool.query(
@@ -252,6 +259,7 @@ const getRationCards = async (req, res, next) => {
        LEFT JOIN shops s ON s.id = rc.shop_id
        LEFT JOIN areas a ON a.id = rc.area_id
        LEFT JOIN wallets w ON w.ration_card_id = rc.id
+       WHERE ${EXCLUDE_DEMO_FIXTURES_SQL}
        ORDER BY rc.created_at DESC
        LIMIT $1 OFFSET $2`,
       [limit, offset],

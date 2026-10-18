@@ -4,6 +4,7 @@ import Card from "../ui/Card";
 import Button from "../ui/Button";
 import Modal from "../ui/Modal";
 import api, { resolvedApiBaseUrl } from "../../api/axios";
+import { debugBanner, debugLog } from "../../lib/weighingDebug";
 
 const TOKEN_KEY = "pds_token";
 const RECONNECT_DELAY_MS = 3000;
@@ -18,6 +19,12 @@ const TERMINAL_STATES = [
   "failed_already_claimed",
   "failed_out_of_tolerance",
 ];
+
+// The panel stops reconnecting once the session can no longer change. A
+// captured session is finished from this screen's point of view, but it has
+// its own display path, so it is kept out of TERMINAL_STATES (which opens the
+// result modal).
+const NO_RECONNECT_STATES = [...TERMINAL_STATES, "captured"];
 
 const resolveWsUrl = () => {
   const base =
@@ -54,27 +61,137 @@ const DispenseWeighingPanel = ({
   const unmountedRef = useRef(false);
   const finishSubmittedRef = useRef(false);
   const freshnessTimerRef = useRef(null);
+  // Socket handlers are created once per connection and must not read React
+  // state, which they would see as it was on the first render. The session
+  // state is therefore mirrored in a ref, and the reconnect decision reads that.
+  const sessionStateRef = useRef("attached");
+  // Incremented on every WebSocket state event. An authoritative GET that was
+  // issued before a newer event is stale, so its answer is dropped.
+  const stateVersionRef = useRef(0);
+
+  // --- Debug instrumentation (temporary; see lib/weighingDebug.js) ---------
+  const connectAttemptRef = useRef(0);
+  const lastStateSourceRef = useRef("initial");
+  const prevSessionStateRef = useRef(null);
+  const lastSnapshotKeyRef = useRef(null);
 
   useEffect(() => {
     unmountedRef.current = false;
+    // Lifetime of THIS effect run. React StrictMode runs effects twice in
+    // development (mount, cleanup, mount). A socket from the first run can still
+    // fire events after its cleanup, so every handler checks this flag and the
+    // socket it belongs to before touching state or scheduling a reconnect.
+    let active = true;
+
+    const applyServerState = (state, extra = {}, source = "ws.state") => {
+      debugLog("state.apply", {
+        sessionId,
+        source,
+        from: sessionStateRef.current,
+        to: state,
+      });
+      lastStateSourceRef.current = source;
+      sessionStateRef.current = state;
+      setSessionState(state);
+      if (state === "confirming" && typeof extra.msLeft === "number") {
+        setMsLeft(extra.msLeft);
+      } else if (state !== "confirming") {
+        setMsLeft(null);
+      }
+      if (state === "committed" && typeof extra.measuredGrams === "number") {
+        setMeasuredGramsConfirmed(extra.measuredGrams);
+      }
+    };
+
+    // Authoritative status, fetched on every connection. This makes a late
+    // subscriber or a reconnect independent of which events the socket replays.
+    const syncFromServer = async () => {
+      const versionAtRequest = stateVersionRef.current;
+      debugLog("hydrate.start", {
+        sessionId,
+        stateVersion: versionAtRequest,
+      });
+      try {
+        const res = await api.get(`/api/dispense/session/${sessionId}`);
+        if (!active) {
+          debugLog("hydrate.discarded", { sessionId, reason: "unmounted" });
+          return;
+        }
+        if (stateVersionRef.current !== versionAtRequest) {
+          debugLog("hydrate.discarded", {
+            sessionId,
+            reason: "newer_ws_state_arrived",
+            serverState: res.data?.session?.state,
+          });
+          return;
+        }
+        debugLog("hydrate.response", {
+          sessionId,
+          status: res.status,
+          state: res.data?.session?.state,
+        });
+        applyServerState(res.data.session.state, {}, "http.hydrate");
+      } catch (error) {
+        // Keep the current state; live events still apply. A failed sync
+        // never enables Finish on its own.
+        debugLog("hydrate.error", {
+          sessionId,
+          status: error?.response?.status ?? null,
+          serverError: error?.response?.data?.error ?? null,
+          message: error?.message ?? null,
+        });
+      }
+    };
 
     const connect = () => {
+      if (!active) return;
+      connectAttemptRef.current += 1;
+      const attempt = connectAttemptRef.current;
       const token = localStorage.getItem(TOKEN_KEY);
-      const ws = new WebSocket(resolveWsUrl(), token ? [token] : undefined);
+      const url = resolveWsUrl();
+      debugLog("ws.connect", { sessionId, attempt, url });
+      const ws = new WebSocket(url, token ? [token] : undefined);
       wsRef.current = ws;
 
+      // A socket that is not the current one for this effect run is stale. Its
+      // events are logged and ignored, so they cannot change state or reconnect.
+      const isStale = () => !active || wsRef.current !== ws;
+
       ws.onopen = () => {
+        if (isStale()) {
+          debugLog("ws.stale_event_ignored", { sessionId, attempt, type: "open" });
+          return;
+        }
+        debugLog("ws.open", { sessionId, attempt });
         setConnected(true);
         ws.send(JSON.stringify({ type: "subscribe", sessionId }));
+        debugLog("ws.subscribe.sent", { sessionId, attempt });
+        syncFromServer();
       };
 
       ws.onmessage = (event) => {
+        if (isStale()) {
+          debugLog("ws.stale_event_ignored", { sessionId, attempt, type: "message" });
+          return;
+        }
         let payload;
         try {
           payload = JSON.parse(event.data);
         } catch {
+          debugLog("ws.message.unparseable", { sessionId });
           return;
         }
+
+        debugLog("ws.message", {
+          sessionId,
+          type: payload.type,
+          gramsInt: payload.gramsInt,
+          state: payload.state,
+          msLeft: payload.msLeft,
+          measuredGrams: payload.measuredGrams,
+          code: payload.code,
+          detail: payload.detail,
+        });
 
         if (payload.type === "reading") {
           if (Number.isFinite(payload.gramsInt)) {
@@ -82,54 +199,78 @@ const DispenseWeighingPanel = ({
             setDeviceFault(null);
             setIsFreshReading(true);
             clearTimeout(freshnessTimerRef.current);
-            freshnessTimerRef.current = setTimeout(
-              () => setIsFreshReading(false),
-              READING_STALE_AFTER_MS,
-            );
+            freshnessTimerRef.current = setTimeout(() => {
+              debugLog("reading.stale", { sessionId });
+              setIsFreshReading(false);
+            }, READING_STALE_AFTER_MS);
           }
         } else if (payload.type === "device_error") {
           setDeviceFault({ code: payload.code, detail: payload.detail });
           setIsFreshReading(false);
           clearTimeout(freshnessTimerRef.current);
         } else if (payload.type === "state") {
-          setSessionState(payload.state);
-          if (
-            payload.state === "confirming" &&
-            typeof payload.msLeft === "number"
-          ) {
-            setMsLeft(payload.msLeft);
-          } else if (payload.state !== "confirming") {
-            setMsLeft(null);
-          }
-          // When backend auto-commits or manually confirmed, record the measured grams
-          if (
-            payload.state === "committed" &&
-            typeof payload.measuredGrams === "number"
-          ) {
-            setMeasuredGramsConfirmed(payload.measuredGrams);
-          }
+          stateVersionRef.current += 1;
+          applyServerState(payload.state, payload, "ws.state");
         }
       };
 
-      ws.onclose = () => {
+      ws.onclose = (event) => {
+        if (isStale()) {
+          debugLog("ws.stale_event_ignored", {
+            sessionId,
+            attempt,
+            type: "close",
+            code: event?.code ?? null,
+            reason: event?.reason || null,
+          });
+          return;
+        }
+        const willReconnect = !NO_RECONNECT_STATES.includes(sessionStateRef.current);
+        debugLog("ws.close", {
+          sessionId,
+          attempt,
+          code: event?.code ?? null,
+          reason: event?.reason || null,
+          wasClean: event?.wasClean ?? null,
+          sessionState: sessionStateRef.current,
+          unmounted: unmountedRef.current,
+          willReconnect,
+        });
         setConnected(false);
-        if (!unmountedRef.current && !TERMINAL_STATES.includes(sessionState)) {
+        if (willReconnect) {
+          debugLog("ws.reconnect.scheduled", {
+            sessionId,
+            delayMs: RECONNECT_DELAY_MS,
+          });
           reconnectTimerRef.current = setTimeout(connect, RECONNECT_DELAY_MS);
         }
       };
 
-      ws.onerror = () => ws.close();
+      ws.onerror = () => {
+        if (isStale()) {
+          debugLog("ws.stale_event_ignored", { sessionId, attempt, type: "error" });
+          return;
+        }
+        debugLog("ws.error", {
+          sessionId,
+          attempt,
+          readyState: ws.readyState,
+        });
+        ws.close();
+      };
     };
 
     connect();
 
     return () => {
+      debugLog("ws.cleanup", { sessionId });
+      active = false;
       unmountedRef.current = true;
       clearTimeout(reconnectTimerRef.current);
       clearTimeout(freshnessTimerRef.current);
       wsRef.current?.close();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // Keyed on sessionId only. Everything else the handlers need is in refs.
   }, [sessionId]);
 
   // Local countdown ticker — the server sends msLeft once when 'confirming'
@@ -147,6 +288,25 @@ const DispenseWeighingPanel = ({
     return () => clearInterval(interval);
   }, [isConfirming]);
 
+  // Logs every change of sessionState once, whatever set it.
+  useEffect(() => {
+    const previous = prevSessionStateRef.current;
+    if (previous === sessionState) return;
+    prevSessionStateRef.current = sessionState;
+    debugLog("state.transition", {
+      sessionId,
+      from: previous,
+      to: sessionState,
+      source: lastStateSourceRef.current,
+    });
+    if (sessionState === "confirming") {
+      debugBanner("WEIGHT STABILIZED — FINISH SHOULD ENABLE", {
+        sessionId,
+        source: lastStateSourceRef.current,
+      });
+    }
+  }, [sessionState, sessionId]);
+
   const handleCancel = async () => {
     setCancelling(true);
     try {
@@ -160,13 +320,33 @@ const DispenseWeighingPanel = ({
   };
 
   const handleFinish = async () => {
-    if (!canFinish || finishSubmittedRef.current) return;
+    debugLog("finish.click", {
+      sessionId,
+      canFinish,
+      reasons: disabledReasons,
+    });
+    if (!canFinish || finishSubmittedRef.current) {
+      debugLog("finish.early_return", {
+        sessionId,
+        canFinish,
+        alreadySubmitted: finishSubmittedRef.current,
+        reasons: disabledReasons,
+      });
+      return;
+    }
 
     finishSubmittedRef.current = true;
     setFinishing(true);
     setFinishError("");
     try {
+      debugLog("capture.request", { sessionId });
       const res = await api.post(`/api/dispense/session/${sessionId}/capture`);
+      debugLog("capture.response", {
+        sessionId,
+        status: res.status,
+        state: res.data?.state,
+        measuredGrams: res.data?.measured_grams,
+      });
       const capturedGrams = res.data?.measured_grams;
       if (!Number.isFinite(capturedGrams)) {
         throw new Error("The server did not return a valid captured weight.");
@@ -175,6 +355,12 @@ const DispenseWeighingPanel = ({
       setHasFinished(true);
       onDone("captured", capturedGrams);
     } catch (error) {
+      debugLog("capture.error", {
+        sessionId,
+        status: error?.response?.status ?? null,
+        serverError: error?.response?.data?.error ?? null,
+        message: error?.message ?? null,
+      });
       finishSubmittedRef.current = false;
       setFinishError(
         error.response?.data?.error ||
@@ -201,6 +387,54 @@ const DispenseWeighingPanel = ({
     !finishing &&
     !hasFinished;
 
+  // Every reason canFinish is false right now, for the debug log.
+  const disabledReasons = [];
+  if (sessionState !== "confirming") disabledReasons.push(`state=${sessionState}`);
+  if (!connected) disabledReasons.push("ws=disconnected");
+  if (!isFreshReading) disabledReasons.push("reading=not_fresh");
+  if (!isValidReading) disabledReasons.push(`reading=invalid(${gramsInt})`);
+  else if (!isWithinTolerance) disabledReasons.push(`reading=out_of_tolerance(diff=${diff})`);
+  if (deviceFault) disabledReasons.push(`device_fault=${deviceFault.code}`);
+  if (finishing) disabledReasons.push("finishing");
+  if (hasFinished) disabledReasons.push("already_finished");
+
+  // Logs the canFinish inputs on every render, but only when they actually
+  // change, so identical renders do not flood the console.
+  // TEMPORARY: each canFinish gate as its own boolean, so the log shows exactly
+  // which one is false. Same inputs as canFinish above.
+  const gateBreakdown = {
+    stateIsConfirming: sessionState === "confirming",
+    wsConnected: connected,
+    readingFresh: isFreshReading,
+    readingValid: isValidReading,
+    withinTolerance: isWithinTolerance,
+    noDeviceFault: !deviceFault,
+    notFinishing: !finishing,
+    notAlreadyFinished: !hasFinished,
+  };
+  const snapshot = {
+    sessionState,
+    connected,
+    isFreshReading,
+    measuredGrams: gramsInt,
+    targetGrams: entitledGrams,
+    toleranceGrams,
+    diffGrams: diff,
+    isWithinTolerance,
+    deviceFault: deviceFault?.code ?? null,
+    finishing,
+    hasFinished,
+    canFinish,
+    gates: gateBreakdown,
+    reasons: disabledReasons,
+  };
+  useEffect(() => {
+    const key = JSON.stringify({ sessionId, ...snapshot });
+    if (key === lastSnapshotKeyRef.current) return;
+    lastSnapshotKeyRef.current = key;
+    debugLog("canFinish.evaluate", { sessionId, ...snapshot });
+  });
+
   let band = "red";
   if (absDiff <= toleranceGrams) {
     band = "green";
@@ -223,6 +457,8 @@ const DispenseWeighingPanel = ({
     stateText = "Device offline";
   } else if (sessionState === "cancelled") {
     stateText = "Cancelled";
+  } else if (sessionState === "captured") {
+    stateText = "Measurement captured";
   } else if (sessionState === "committed") {
     stateText = "Confirmed";
   } else if (sessionState === "failed_insufficient_balance") {
@@ -309,14 +545,28 @@ const DispenseWeighingPanel = ({
       </Card>
 
       <div className="flex gap-3">
-        <Button
-          variant="primary"
-          className="h-12 flex-1 text-base"
-          onClick={handleFinish}
-          disabled={!canFinish}
+        {/* Browsers do not dispatch click events to a disabled button, so this
+            pointer log is the only record of a press while Finish is disabled. */}
+        <div
+          className="flex-1"
+          onPointerDownCapture={() => {
+            if (!canFinish) {
+              debugLog("finish.pointerdown_while_disabled", {
+                sessionId,
+                reasons: disabledReasons,
+              });
+            }
+          }}
         >
-          {finishing ? "Finishing..." : `Finish ${commodityLabel}`}
-        </Button>
+          <Button
+            variant="primary"
+            className="h-12 w-full text-base"
+            onClick={handleFinish}
+            disabled={!canFinish}
+          >
+            {finishing ? "Finishing..." : `Finish ${commodityLabel}`}
+          </Button>
+        </div>
         <Button
           variant="danger"
           className="h-12 flex-1 text-base"

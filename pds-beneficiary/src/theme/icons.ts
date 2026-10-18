@@ -13,6 +13,7 @@ export const icons = {
     wallet: { family: "Ionicons", name: "wallet-outline" },
     family: { family: "Ionicons", name: "people-outline" },
     transactions: { family: "Ionicons", name: "receipt-outline" },
+    fpsShop: { family: "Ionicons", name: "storefront-outline" },
     greeting: { family: "MaterialCommunityIcons", name: "hand-wave" },
     headOfFamily: { family: "Ionicons", name: "star" },
     grainRice: { family: "MaterialCommunityIcons", name: "rice" },

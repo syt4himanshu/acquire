@@ -168,7 +168,9 @@ const Beneficiaries = () => {
           ) : (
             pageRows.map((item, index) => (
               <Table.Row key={`${item.card_number}-${index}`}>
-                <Table.Cell>{item.name}</Table.Cell>
+                <Table.Cell>
+                  {item.name || <span className="italic text-text-secondary">Name unavailable</span>}
+                </Table.Cell>
                 <Table.Cell>{item.mobile || '—'}</Table.Cell>
                 <Table.Cell>{item.card_number}</Table.Cell>
                 <Table.Cell>

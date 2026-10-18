@@ -7,6 +7,7 @@ const {
     getTransactions,
     createQrSession,
 } = require("../controllers/beneficiaryController");
+const { getMyFpsStatus } = require("../controllers/shopStatusController");
 
 const router = express.Router();
 
@@ -18,5 +19,6 @@ router.get("/wallet", getWallet);
 router.get("/family", getFamily);
 router.get("/transactions", getTransactions);
 router.post("/qr-session", createQrSession);
+router.get("/fps-status", getMyFpsStatus);
 
 module.exports = router;

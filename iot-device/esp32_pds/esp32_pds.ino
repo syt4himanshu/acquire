@@ -31,7 +31,11 @@ unsigned long lastHeartbeat = 0;
 unsigned long lastReading = 0;
 
 const unsigned long HEARTBEAT_INTERVAL = 5000;
-const unsigned long READING_INTERVAL = 1000;
+// Send a reading every 100 ms (10 Hz target, see PDS_SAMPLE_INTERVAL_MS in
+// pds_config.h). The backend auto-confirm rule needs 3 readings inside a 3 s
+// window, which a 1 s cadence could only just meet and the observed ~1.7 s cadence
+// could never meet. Do not raise this without re-checking that rule.
+const unsigned long READING_INTERVAL = 100;
 
 // ===============================
 // SEND HELLO
@@ -140,7 +144,9 @@ void loop() {
   // -------------------------------
   // Read sensor
   // -------------------------------
-  long rawValue = scale.read_average(10);
+  // 3 samples, not 10: read_average(10) blocks for about a second at the HX711's
+  // 10 SPS rate, which starved the stability window of samples.
+  long rawValue = scale.read_average(3);
 
   // -------------------------------
   // Calculate weight

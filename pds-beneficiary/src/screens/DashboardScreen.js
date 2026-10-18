@@ -3,6 +3,7 @@ import { View, Text, ScrollView, StyleSheet, RefreshControl, Alert } from "react
 import { SafeAreaView } from "react-native-safe-area-context";
 import api from "../api/axios";
 import { useAuth } from "../context/AuthContext";
+import FpsStatusCard from "../components/FpsStatusCard";
 import { colors, typography, spacing, radius } from "../theme";
 import {
     Card,
@@ -28,12 +29,44 @@ import {
 // actual per-category entitlement total.
 const MOCK_MONTHLY_ENTITLEMENT_KG = { rice: 4, wheat: 3 };
 
+// The FPS status is polled, not pushed: the only shop-level live channel is the
+// shopkeeper's own socket, and beneficiaries have no socket. A 30 s poll is
+// enough for an Open/Closed flag and a queue estimate.
+const FPS_POLL_INTERVAL_MS = 30000;
+
 export default function DashboardScreen({ navigation }) {
     const { logout } = useAuth();
     const toast = useToast();
     const [data, setData] = useState(null);
     const [loading, setLoading] = useState(true);
     const [refreshing, setRefreshing] = useState(false);
+    const [fps, setFps] = useState({ snapshot: null, fetchedAtMs: null, failed: false });
+    const [clockMs, setClockMs] = useState(() => Date.now());
+
+    // Separate from fetchAll so a failing FPS request cannot break the wallet
+    // and transaction data. A 401 is left to fetchAll, which logs out.
+    useEffect(() => {
+        let active = true;
+        const loadFps = async () => {
+            try {
+                const res = await api.get("/api/beneficiary/fps-status");
+                if (active) setFps({ snapshot: res.data.status, fetchedAtMs: Date.now(), failed: false });
+            } catch (err) {
+                if (active && err.response?.status !== 401) {
+                    setFps((prev) => ({ ...prev, failed: true }));
+                }
+            }
+        };
+        loadFps();
+        const timer = setInterval(() => {
+            setClockMs(Date.now());
+            loadFps();
+        }, FPS_POLL_INTERVAL_MS);
+        return () => {
+            active = false;
+            clearInterval(timer);
+        };
+    }, []);
 
     const fetchAll = useCallback(async () => {
         try {
@@ -135,6 +168,14 @@ export default function DashboardScreen({ navigation }) {
                         />
                     </View>
                 </Card>
+
+                {/* FPS status */}
+                <FpsStatusCard
+                    snapshot={fps.snapshot}
+                    fetchedAtMs={fps.fetchedAtMs}
+                    nowMs={clockMs}
+                    failed={fps.failed}
+                />
 
                 {/* QR Button */}
                 <Button

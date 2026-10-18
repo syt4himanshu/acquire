@@ -123,17 +123,19 @@ const createSession = async (rcId, sId, userId, expiresInMs = 60000) => {
     return sessionId;
 };
 
-// Helper: seed verified IoT sessions for rice and wheat
-const seedVerifiedSessions = async (rcId, sId) => {
+// Helper: seed captured IoT sessions for rice and wheat, bound to the QR that
+// authorises the distribution. Finalization accepts only captured sessions
+// whose measurement is inside tolerance and which belong to this QR.
+const seedVerifiedSessions = async (rcId, sId, qrSessionId) => {
     const riceSessionId = crypto.randomUUID();
     const wheatSessionId = crypto.randomUUID();
     const expiresAt = new Date(Date.now() + 60000);
 
     await pool.query(
-        `INSERT INTO dispense_sessions (id, shop_id, ration_card_id, commodity, entitled_grams, tolerance_grams, state, expires_at)
-         VALUES ($1, $3, $2, 'rice', 3000, 30, 'committed', $4),
-                ($5, $3, $2, 'wheat', 2000, 20, 'committed', $4)`,
-        [riceSessionId, rcId, sId, expiresAt, wheatSessionId],
+        `INSERT INTO dispense_sessions (id, shop_id, ration_card_id, commodity, entitled_grams, tolerance_grams, state, expires_at, qr_session_id, measured_grams)
+         VALUES ($1, $3, $2, 'rice', 3000, 30, 'captured', $4, $6, 3000),
+                ($5, $3, $2, 'wheat', 2000, 20, 'captured', $4, $6, 2000)`,
+        [riceSessionId, rcId, sId, expiresAt, wheatSessionId, qrSessionId],
     );
 
     return { riceSessionId, wheatSessionId };
@@ -149,16 +151,18 @@ beforeEach(async () => {
         `UPDATE wallets SET rice_balance_kg=3, wheat_balance_kg=2 WHERE ration_card_id=$1`,
         [rationCard2Id],
     );
-    await pool.query(`DELETE FROM transactions`);
-    await pool.query(`DELETE FROM qr_sessions`);
+    // Delete children before parents: audit rows reference transactions and
+    // sessions, and sessions reference QR sessions (all RESTRICT).
     await pool.query(`DELETE FROM dispense_records`);
+    await pool.query(`DELETE FROM transactions`);
     await pool.query(`DELETE FROM dispense_sessions`);
+    await pool.query(`DELETE FROM qr_sessions`);
 });
 
 describe('POST /api/shopkeeper/dispense', () => {
     test('1. valid dispense → 200 + wallet deducted', async () => {
         const sessionId = await createSession(rationCardId, shopId, shopkeeperId);
-        const { riceSessionId, wheatSessionId } = await seedVerifiedSessions(rationCardId, shopId);
+        const { riceSessionId, wheatSessionId } = await seedVerifiedSessions(rationCardId, shopId, sessionId);
 
         const res = await request(app)
             .post('/api/shopkeeper/dispense')
@@ -196,7 +200,7 @@ describe('POST /api/shopkeeper/dispense', () => {
 
     test('3. ration card from different shop → 403, wallet unchanged', async () => {
         const sessionId = await createSession(rationCard2Id, shopId, shopkeeperId);
-        const { riceSessionId, wheatSessionId } = await seedVerifiedSessions(rationCard2Id, shop2Id);
+        const { riceSessionId, wheatSessionId } = await seedVerifiedSessions(rationCard2Id, shop2Id, sessionId);
 
         const res = await request(app)
             .post('/api/shopkeeper/dispense')
@@ -227,7 +231,7 @@ describe('POST /api/shopkeeper/dispense', () => {
 
     test('5. dispense creates single transaction record with correct fields', async () => {
         const sessionId = await createSession(rationCardId, shopId, shopkeeperId);
-        const { riceSessionId, wheatSessionId } = await seedVerifiedSessions(rationCardId, shopId);
+        const { riceSessionId, wheatSessionId } = await seedVerifiedSessions(rationCardId, shopId, sessionId);
 
         await request(app)
             .post('/api/shopkeeper/dispense')

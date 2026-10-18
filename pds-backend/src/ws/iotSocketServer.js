@@ -12,6 +12,7 @@ const {
 const dispenseSessionService = require("../services/dispenseSessionService");
 const dispenseSessionBus = require("../services/dispenseSessionBus");
 const stabilityDetectorService = require("../services/stabilityDetectorService");
+const { logStabilityEvaluation, whyNotStable } = require("../services/stabilityDebug"); // TEMPORARY
 const deviceConnectionRegistry = require("../services/deviceConnectionRegistry");
 const metrics = require("../config/metrics");
 const { DEVICE_IDLE_TIMEOUT_MS } = require("../config/iot");
@@ -290,6 +291,29 @@ const createIotSocketServer = () => {
         session.tolerance_grams,
       );
 
+      // TEMPORARY stability diagnostics (see services/stabilityDebug.js).
+      const stableReason = stable
+        ? null
+        : whyNotStable(sessionReadings, session.entitled_grams, session.tolerance_grams);
+      logStabilityEvaluation({
+        logger,
+        deviceId: device.device_id,
+        sessionId: session.id,
+        state: session.state,
+        readings: sessionReadings,
+        nowMs,
+        entitledGrams: session.entitled_grams,
+        toleranceGrams: session.tolerance_grams,
+        stable,
+        decision: stable
+          ? session.state === "confirming"
+            ? "already_confirming"
+            : "begin_confirming"
+          : session.state === "confirming"
+          ? `revert_to_weighing:${stableReason}`
+          : `not_stable:${stableReason}`,
+      });
+
       // Debug logging for stability detection
       logger.debug("[IoT] Stability check", {
         deviceId: device.device_id,
@@ -309,6 +333,12 @@ const createIotSocketServer = () => {
           readingsCount: sessionReadings.length,
         });
         const began = await dispenseSessionService.beginConfirming(session.id);
+        logger.info("[IOT-STABILITY-DEBUG] beginConfirming", {
+          deviceId: device.device_id,
+          sessionId: session.id,
+          applied: began,
+          reason: began ? "row_was_weighing" : "row_was_not_weighing_or_gone",
+        });
         if (began) {
           const sessionIdAtConfirmStart = session.id;
           dispenseSessionBus.publish(session.id, {

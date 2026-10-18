@@ -22,6 +22,23 @@ const metrics = require("../config/metrics");
 
 const SESSION_TTL_MS = 120 * 1000;
 
+// How long a QR stays valid for a distribution once its first weighing has
+// reserved it. Long enough to weigh every commodity on the card, short enough
+// that a stale QR cannot be used later. This is a policy value: change it here,
+// not at each call site.
+const QR_RESERVATION_WINDOW_MS = 10 * 60 * 1000;
+
+// States in which a session still holds its commodity slot on a QR. Must match
+// the partial unique index in migration 028 and tests/setup.js.
+const LIVE_SESSION_STATES = [
+  "active",
+  "attached",
+  "weighing",
+  "confirming",
+  "captured",
+  "committed",
+];
+
 const COMMODITY_BALANCE_COLUMN = {
   rice: "rice_balance_kg",
   wheat: "wheat_balance_kg",
@@ -120,7 +137,7 @@ const createSession = async ({
     await client.query("BEGIN");
 
     const qrResult = await client.query(
-      `SELECT session_id, ration_card_id, shop_id, is_used, expires_at
+      `SELECT session_id, ration_card_id, shop_id, is_used, expires_at, reserved_until
        FROM qr_sessions WHERE session_id = $1 FOR UPDATE`,
       [qrSessionId],
     );
@@ -152,7 +169,13 @@ const createSession = async ({
         message: "QR session already used",
       };
     }
-    if (new Date(qr.expires_at) < new Date()) {
+    // Before the first weighing the QR is bound by its scan expiry. Once a
+    // session has reserved it, the reservation window governs instead, so the
+    // second commodity of the same distribution can still be weighed.
+    const qrExpired = qr.reserved_until
+      ? new Date(qr.reserved_until) < new Date()
+      : new Date(qr.expires_at) < new Date();
+    if (qrExpired) {
       await client.query("ROLLBACK");
       return {
         ok: false,
@@ -252,6 +275,24 @@ const createSession = async ({
     );
     const expiresAt = new Date(Date.now() + SESSION_TTL_MS);
 
+    // The QR row lock above serialises concurrent creates for this QR, so this
+    // check cannot race another create. A cancelled or failed session releases
+    // its commodity so the shopkeeper can re-weigh; every other state holds it.
+    const liveResult = await client.query(
+      `SELECT id FROM dispense_sessions
+       WHERE qr_session_id = $1 AND commodity = $2 AND state = ANY($3::text[])`,
+      [qrSessionId, commodity, LIVE_SESSION_STATES],
+    );
+    if (liveResult.rows.length > 0) {
+      await client.query("ROLLBACK");
+      return {
+        ok: false,
+        status: 409,
+        code: "IOT_SESSION_IN_PROGRESS",
+        message: `A ${commodity} weighing already exists for this QR`,
+      };
+    }
+
     const sessionResult = await client.query(
       `INSERT INTO dispense_sessions (shop_id, ration_card_id, commodity, entitled_grams, tolerance_grams, expires_at, qr_session_id)
        VALUES ($1,$2,$3,$4,$5,$6,$7)
@@ -268,11 +309,16 @@ const createSession = async ({
     );
     const session = sessionResult.rows[0];
 
+    // Reserve, do not consume. The QR is marked used only by the final
+    // distribution (POST /api/shopkeeper/dispense). The reservation starts at
+    // the first weighing and is written once, so later commodities cannot
+    // extend it.
     await client.query(
       `UPDATE qr_sessions
-       SET is_used = true, used_at = NOW()
-       WHERE session_id = $1 AND is_used = false`,
-      [qrSessionId],
+       SET reserved_at = COALESCE(reserved_at, NOW()),
+           reserved_until = COALESCE(reserved_until, NOW() + ($2 * INTERVAL '1 millisecond'))
+       WHERE session_id = $1`,
+      [qrSessionId, QR_RESERVATION_WINDOW_MS],
     );
 
     const jti = crypto.randomUUID();
@@ -314,6 +360,16 @@ const createSession = async ({
         status: 500,
         code: err.code,
         message: "Dispensing tolerance is not configured for this commodity",
+      };
+    }
+    // The partial unique index is the backstop if two creates ever reach the
+    // INSERT together: the loser gets the same answer as the lock-based check.
+    if (err.code === "23505") {
+      return {
+        ok: false,
+        status: 409,
+        code: "IOT_SESSION_IN_PROGRESS",
+        message: `A ${commodity} weighing already exists for this QR`,
       };
     }
     logger.error("[IoT] createSession failed", {
@@ -584,12 +640,22 @@ const captureMeasurement = async (sessionId, shopId) => {
         freshReadings.length,
     );
 
-    await client.query(
-      `UPDATE dispense_sessions SET state = 'captured'
+    // The frozen measurement is stored on the session so the final distribution
+    // reads what was captured, not a figure the client sends back.
+    const captured = await client.query(
+      `UPDATE dispense_sessions SET state = 'captured', measured_grams = $3
          WHERE id = $1 AND shop_id = $2 AND state = 'confirming'`,
-      [sessionId, shopId],
+      [sessionId, shopId, measuredGrams],
     );
     await client.query("COMMIT");
+
+    if (captured.rowCount === 1) {
+      dispenseSessionBus.publish(sessionId, {
+        type: "state",
+        state: "captured",
+        measuredGrams,
+      });
+    }
 
     return {
       ok: true,

@@ -36,4 +36,16 @@ const transactionSchema = Joi.object({
     'any.invalid': 'At least one quantity must be greater than 0',
 });
 
-module.exports = { dispenseSchema, transactionSchema };
+const { MAX_QUEUE_COUNT } = require('../config/shopStatus');
+
+// Strict: "12", "12.0", "1e2" and null are refused rather than coerced, so
+// the stored value is exactly what the shopkeeper typed as a whole number.
+const openStatusSchema = Joi.object({
+    is_open: Joi.boolean().strict().required(),
+});
+
+const queueCountSchema = Joi.object({
+    queue_count: Joi.number().integer().min(0).max(MAX_QUEUE_COUNT).strict().required(),
+});
+
+module.exports = { dispenseSchema, transactionSchema, openStatusSchema, queueCountSchema };

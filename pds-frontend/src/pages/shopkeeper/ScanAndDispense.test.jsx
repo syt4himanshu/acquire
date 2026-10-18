@@ -202,6 +202,68 @@ describe("Phase 1 shopkeeper measurement flow", () => {
     );
   });
 
+  it("does not resubmit a refused distribution on its own, and resubmits only when the shopkeeper retries", async () => {
+    const user = userEvent.setup();
+    api.get.mockImplementation((url) =>
+      Promise.resolve({
+        data:
+          url === "/api/shopkeeper/beneficiary/card-123"
+            ? beneficiaryData
+            : deviceStatus(),
+      }),
+    );
+    let distributionAttempts = 0;
+    api.post.mockImplementation((url, body) => {
+      if (url === "/api/shopkeeper/dispense") {
+        distributionAttempts += 1;
+        if (distributionAttempts === 1) {
+          return Promise.reject({
+            response: {
+              data: { error: "Requested quantity exceeds wallet balance" },
+            },
+          });
+        }
+      }
+      return createSessionResponse(url, body);
+    });
+
+    await scanBeneficiary(user);
+    await user.click(
+      await screen.findByRole("button", { name: /Start rice weighing/i }),
+    );
+    await user.click(
+      await screen.findByRole("button", { name: "Finish rice" }),
+    );
+    const startWheat = await screen.findByRole(
+      "button",
+      { name: /Ready to weigh wheat/i },
+      { timeout: 5000 },
+    );
+    await waitFor(() => expect(startWheat).toBeEnabled(), { timeout: 5000 });
+    await user.click(startWheat);
+    await user.click(
+      await screen.findByRole("button", { name: /Start wheat weighing/i }),
+    );
+    await user.click(
+      await screen.findByRole("button", { name: "Finish wheat" }),
+    );
+
+    expect(
+      await screen.findByText("Requested quantity exceeds wallet balance"),
+    ).toBeInTheDocument();
+    // Give any automatic resubmission time to fire. None should.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(distributionAttempts).toBe(1);
+
+    await user.click(
+      screen.getByRole("button", { name: "Retry Distribution" }),
+    );
+    await waitFor(() => expect(distributionAttempts).toBe(2));
+    expect(
+      await screen.findByRole("button", { name: "Distribution complete" }),
+    ).toBeInTheDocument();
+  });
+
   it("does not advance or mark a commodity complete when its weighing is cancelled", async () => {
     const user = userEvent.setup();
     api.get.mockImplementation((url) =>

@@ -112,7 +112,7 @@ afterAll(async () => {
 });
 
 describe('POST /api/dispense/session', () => {
-    it('creates a session, computes tolerance, and consumes the QR session', async () => {
+    it('creates a session, computes tolerance, and reserves (does not consume) the QR session', async () => {
         const qrSessionId = await seedQrSession();
         const res = await request(app)
             .post('/api/dispense/session')
@@ -127,8 +127,11 @@ describe('POST /api/dispense/session', () => {
         expect(sessionRow.rows[0].state).toBe('active');
         expect(sessionRow.rows[0].tolerance_grams).toBe(30); // max(20, 1% of 3000)
 
-        const qrRow = await pool.query('SELECT is_used FROM qr_sessions WHERE session_id = $1', [qrSessionId]);
-        expect(qrRow.rows[0].is_used).toBe(true);
+        // The first weighing reserves the QR for the whole distribution. It is
+        // consumed only by the final distribution, not here.
+        const qrRow = await pool.query('SELECT is_used, reserved_until FROM qr_sessions WHERE session_id = $1', [qrSessionId]);
+        expect(qrRow.rows[0].is_used).toBe(false);
+        expect(qrRow.rows[0].reserved_until).not.toBeNull();
     });
 
     it('applies the 20g minimum tolerance floor for small quantities', async () => {

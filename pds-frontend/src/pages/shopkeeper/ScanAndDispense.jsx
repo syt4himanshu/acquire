@@ -95,6 +95,9 @@ const ScanAndDispense = () => {
   const [isFinalizingDistribution, setIsFinalizingDistribution] =
     useState(false);
   const [distributionResult, setDistributionResult] = useState(null);
+  // Set when finalize fails. The effect below stays idle until the shopkeeper
+  // asks to retry, so a persistent refusal is not resubmitted in a loop.
+  const [finalizeError, setFinalizeError] = useState("");
   const [tareRequired, setTareRequired] = useState(false);
   const [zeroReadings, setZeroReadings] = useState([]);
   const activeSessionIdRef = useRef(null);
@@ -196,6 +199,8 @@ const ScanAndDispense = () => {
     }
     setWeighingSession(null);
     setCompletedMeasurements({});
+    setDistributionResult(null);
+    setFinalizeError("");
     tareRequiredRef.current = false;
     setTareRequired(false);
     setZeroReadings([]);
@@ -329,6 +334,7 @@ const ScanAndDispense = () => {
       !qrPayload ||
       isFinalizingDistribution ||
       distributionResult ||
+      finalizeError ||
       requiredCommodities.length === 0
     ) {
       return;
@@ -358,10 +364,11 @@ const ScanAndDispense = () => {
           response.data?.message || "Distribution completed successfully.",
         );
       } catch (error) {
-        toast.danger(
+        const message =
           error.response?.data?.error ||
-            "Distribution could not be completed. Please retry.",
-        );
+          "Distribution could not be completed. Please retry.";
+        setFinalizeError(message);
+        toast.danger(message);
       } finally {
         setIsFinalizingDistribution(false);
       }
@@ -372,6 +379,7 @@ const ScanAndDispense = () => {
     beneficiary,
     completedMeasurements,
     distributionResult,
+    finalizeError,
     flowState,
     isFinalizingDistribution,
     qrPayload,
@@ -633,18 +641,30 @@ const ScanAndDispense = () => {
                     variant="primary"
                     className="h-11 w-full"
                     disabled={isFinalizingDistribution}
+                    onClick={
+                      finalizeError && !distributionResult
+                        ? () => setFinalizeError("")
+                        : undefined
+                    }
                   >
                     {isFinalizingDistribution
                       ? "Completing Distribution..."
                       : distributionResult
                       ? "Distribution complete"
+                      : finalizeError
+                      ? "Retry Distribution"
                       : "Complete Distribution"}
                   </Button>
-                  <p className="text-center text-xs text-text-secondary">
+                  <p
+                    className="text-center text-xs text-text-secondary"
+                    role={finalizeError ? "alert" : undefined}
+                  >
                     {isFinalizingDistribution
                       ? "Finalizing the weighted transaction and updating the wallet."
                       : distributionResult
                       ? "The full allocation has been committed and the transaction is recorded."
+                      : finalizeError
+                      ? finalizeError
                       : "Finalizing the completed measurements now uses the canonical transaction flow."}
                   </p>
                 </div>

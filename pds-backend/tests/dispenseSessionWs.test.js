@@ -486,3 +486,228 @@ describe("IoT-gated dispense — sanity-ceiling spikes", () => {
     );
   });
 });
+
+describe("IoT weighing state synchronisation over the shopkeeper socket", () => {
+  const listen = (ws) => {
+    const messages = [];
+    ws.on("message", (raw) => messages.push(JSON.parse(raw.toString())));
+    return messages;
+  };
+
+  const subscribe = (ws, sessionId) =>
+    ws.send(JSON.stringify({ type: "subscribe", sessionId }));
+
+  const reachConfirming = async (deviceWs, extraReadings = 0) => {
+    for (let i = 0; i < 20 + extraReadings; i++) {
+      sendReading(deviceWs, 3000);
+      await sleep(20);
+    }
+  };
+
+  it("a shopkeeper that subscribes after the readings have overwritten the event still receives confirming first", async () => {
+    const rationCardId = await seedRationCardWithWallet({
+      cardNumber: "BPL-WS-LATE-SUB",
+      riceKg: 3,
+    });
+    const sessionId = await createAndAttachSession({ rationCardId, entitledGrams: 3000 });
+    const deviceWs = await connectDevice(deviceId, deviceRawToken);
+    await reachConfirming(deviceWs);
+    await waitFor(async () => {
+      const res = await pool.query("SELECT state FROM dispense_sessions WHERE id = $1", [sessionId]);
+      return res.rows[0].state === "confirming";
+    });
+    // Readings keep arriving after confirming, overwriting any "latest" slot.
+    await reachConfirming(deviceWs, 30);
+
+    const shopkeeperWs = await connectShopkeeper(shopkeeperToken);
+    const messages = listen(shopkeeperWs);
+    subscribe(shopkeeperWs, sessionId);
+    await sleep(300);
+
+    const states = messages.filter((m) => m.type === "state");
+    expect(states[0]).toEqual({ type: "state", state: "confirming" });
+
+    deviceWs.close();
+    shopkeeperWs.close();
+  });
+
+  it("a shopkeeper that reconnects is brought back to confirming", async () => {
+    const rationCardId = await seedRationCardWithWallet({
+      cardNumber: "BPL-WS-RECONNECT",
+      riceKg: 3,
+    });
+    const sessionId = await createAndAttachSession({ rationCardId, entitledGrams: 3000 });
+    const deviceWs = await connectDevice(deviceId, deviceRawToken);
+
+    const first = await connectShopkeeper(shopkeeperToken);
+    subscribe(first, sessionId);
+    await sleep(50);
+    first.close();
+
+    await reachConfirming(deviceWs);
+    await waitFor(async () => {
+      const res = await pool.query("SELECT state FROM dispense_sessions WHERE id = $1", [sessionId]);
+      return res.rows[0].state === "confirming";
+    });
+
+    const second = await connectShopkeeper(shopkeeperToken);
+    const messages = listen(second);
+    subscribe(second, sessionId);
+    await sleep(300);
+    expect(messages.find((m) => m.type === "state")).toEqual({ type: "state", state: "confirming" });
+
+    deviceWs.close();
+    second.close();
+  });
+
+  it("a live subscriber is told the measurement was captured, with the grams", async () => {
+    const rationCardId = await seedRationCardWithWallet({
+      cardNumber: "BPL-WS-CAPTURED-EVENT",
+      riceKg: 3,
+    });
+    const sessionId = await createAndAttachSession({ rationCardId, entitledGrams: 3000 });
+    const deviceWs = await connectDevice(deviceId, deviceRawToken);
+    const shopkeeperWs = await connectShopkeeper(shopkeeperToken);
+    const messages = listen(shopkeeperWs);
+    subscribe(shopkeeperWs, sessionId);
+    await sleep(50);
+
+    await reachConfirming(deviceWs);
+    await waitFor(async () => {
+      const res = await pool.query("SELECT state FROM dispense_sessions WHERE id = $1", [sessionId]);
+      return res.rows[0].state === "confirming";
+    });
+
+    const captureRes = await request(app)
+      .post(`/api/dispense/session/${sessionId}/capture`)
+      .set("Authorization", `Bearer ${shopkeeperToken}`);
+    expect(captureRes.status).toBe(200);
+
+    await waitFor(() => messages.find((m) => m.type === "state" && m.state === "captured"));
+    expect(messages.find((m) => m.state === "captured")).toEqual({
+      type: "state",
+      state: "captured",
+      measuredGrams: 3000,
+    });
+
+    deviceWs.close();
+    shopkeeperWs.close();
+  });
+});
+
+describe("IoT-gated dispense — complete rice-then-wheat flow over the sockets", () => {
+  it("captures rice and wheat under one QR, sees each capture on the socket, and finalises exactly one transaction", async () => {
+    await pool.query(
+      `INSERT INTO policies (category, rice_per_card_grams, wheat_per_card_grams) VALUES ('BPL', 3000, 2000)
+       ON CONFLICT (category) DO UPDATE SET rice_per_card_grams = 3000, wheat_per_card_grams = 2000`,
+    );
+    const rationCardId = await seedRationCardWithWallet({ cardNumber: "BPL-WS-FLOW", riceKg: 3 });
+    await pool.query(`UPDATE wallets SET wheat_balance_kg = 2 WHERE ration_card_id = $1`, [rationCardId]);
+    const beneficiary = await pool.query(
+      `INSERT INTO users (role, name, mobile) VALUES ('beneficiary', 'Flow Head', '9000000777') RETURNING id`,
+    );
+    const qrSessionId = crypto.randomBytes(16).toString("hex");
+    await pool.query(
+      `INSERT INTO qr_sessions (session_id, ration_card_id, shop_id, issued_to_user_id, expires_at)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [qrSessionId, rationCardId, shopId, beneficiary.rows[0].id, new Date(Date.now() + 60000)],
+    );
+
+    const deviceWs = await connectDevice(deviceId, deviceRawToken);
+    const shopkeeperWs = await connectShopkeeper(shopkeeperToken);
+    const messages = [];
+    shopkeeperWs.on("message", (raw) => messages.push(JSON.parse(raw.toString())));
+
+    const weigh = async (commodity, grams) => {
+      const created = await request(app)
+        .post("/api/dispense/session")
+        .set("Authorization", `Bearer ${shopkeeperToken}`)
+        .send({
+          ration_card_id: rationCardId,
+          commodity,
+          entitled_grams: grams,
+          qr_session_id: qrSessionId,
+        });
+      expect(created.status).toBe(201);
+      const sessionId = created.body.session_id;
+
+      const attached = await request(app)
+        .post(`/api/dispense/session/${sessionId}/attach`)
+        .set("Authorization", `Bearer ${shopkeeperToken}`)
+        .send({ session_jwt: created.body.session_jwt });
+      expect(attached.status).toBe(200);
+
+      shopkeeperWs.send(JSON.stringify({ type: "subscribe", sessionId }));
+      await sleep(50);
+      for (let i = 0; i < 20; i++) {
+        sendReading(deviceWs, grams);
+        await sleep(20);
+      }
+      await waitFor(() => messages.some((m) => m.type === "state" && m.state === "confirming"));
+
+      const captured = await request(app)
+        .post(`/api/dispense/session/${sessionId}/capture`)
+        .set("Authorization", `Bearer ${shopkeeperToken}`);
+      expect(captured.status).toBe(200);
+      expect(captured.body).toMatchObject({ state: "captured", measured_grams: grams });
+      await waitFor(() => messages.some((m) => m.type === "state" && m.state === "captured"));
+      return sessionId;
+    };
+
+    const riceId = await weigh("rice", 3000);
+    // The socket saw the rice session through to captured before wheat began.
+    expect(messages.filter((m) => m.type === "state").map((m) => m.state)).toEqual(
+      expect.arrayContaining(["confirming", "captured"]),
+    );
+    const wheatId = await weigh("wheat", 2000);
+
+    const finalized = await request(app)
+      .post("/api/shopkeeper/dispense")
+      .set("Authorization", `Bearer ${shopkeeperToken}`)
+      .send({
+        ration_card_id: rationCardId,
+        session_id: qrSessionId,
+        rice_session_id: riceId,
+        wheat_session_id: wheatId,
+      });
+    expect(finalized.status).toBe(200);
+    expect(finalized.body.dispensed).toEqual({ rice_qty_kg: 3, wheat_qty_kg: 2 });
+
+    const wallet = await pool.query(
+      `SELECT rice_balance_kg, wheat_balance_kg FROM wallets WHERE ration_card_id = $1`,
+      [rationCardId],
+    );
+    expect(Number(wallet.rows[0].rice_balance_kg)).toBe(0);
+    expect(Number(wallet.rows[0].wheat_balance_kg)).toBe(0);
+    const txs = await pool.query(`SELECT COUNT(*)::int AS n FROM transactions WHERE ration_card_id = $1`, [rationCardId]);
+    expect(txs.rows[0].n).toBe(1);
+
+    deviceWs.close();
+    shopkeeperWs.close();
+  });
+});
+
+describe("weighing -> confirming depends on the device sample cadence (end to end)", () => {
+  const streamAt = async (intervalMs, samples, cardNumber) => {
+    const rationCardId = await seedRationCardWithWallet({ cardNumber, riceKg: 3 });
+    const sessionId = await createAndAttachSession({ rationCardId, entitledGrams: 3000 });
+    const deviceWs = await connectDevice(deviceId, deviceRawToken);
+    for (let i = 0; i < samples; i++) {
+      sendReading(deviceWs, 3000);
+      await sleep(intervalMs);
+    }
+    const res = await pool.query("SELECT state FROM dispense_sessions WHERE id = $1", [sessionId]);
+    deviceWs.close();
+    return res.rows[0].state;
+  };
+
+  it("a steady weight streamed at 1 s reaches confirming", async () => {
+    const state = await streamAt(1000, 6, "BPL-WS-CADENCE-1S");
+    expect(state).toBe("confirming");
+  }, 30000);
+
+  it("a steady weight streamed at the observed 1.7 s cadence stays in weighing", async () => {
+    const state = await streamAt(1700, 6, "BPL-WS-CADENCE-1P7S");
+    expect(state).toBe("weighing");
+  }, 30000);
+});

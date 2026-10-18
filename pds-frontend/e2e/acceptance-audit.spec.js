@@ -4,6 +4,7 @@ import pg from 'pg';
 import crypto from 'crypto';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { assertDisposableE2eDatabase } from './disposableDb.js';
 
 /**
  * FULL END-TO-END PDS ACCEPTANCE AUDIT
@@ -63,6 +64,7 @@ test.beforeAll(() => {
     if (!process.env.E2E_DATABASE_URL) {
         throw new Error('E2E_DATABASE_URL must point at the database the running backend uses.');
     }
+    assertDisposableE2eDatabase(process.env.E2E_DATABASE_URL);
     pool = new Pool({ connectionString: process.env.E2E_DATABASE_URL });
 });
 

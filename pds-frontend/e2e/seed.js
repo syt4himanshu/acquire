@@ -1,6 +1,7 @@
 import pg from 'pg';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
+import { assertDisposableE2eDatabase } from './disposableDb.js';
 
 const { Pool } = pg;
 
@@ -22,6 +23,7 @@ export async function seedE2eData() {
         );
     }
 
+    assertDisposableE2eDatabase(connectionString);
     const pool = new Pool({ connectionString });
     const suffix = crypto.randomBytes(4).toString('hex');
 
@@ -117,6 +119,7 @@ export async function seedIotOpsData() {
         throw new Error('E2E_DATABASE_URL must be set (see iot-device/PHASE3_DONE.md) to run this E2E test.');
     }
 
+    assertDisposableE2eDatabase(connectionString);
     const pool = new Pool({ connectionString });
     const suffix = crypto.randomBytes(4).toString('hex');
 

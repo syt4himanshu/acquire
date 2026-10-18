@@ -61,6 +61,21 @@ const createSchema = async () => {
     )
   `);
 
+  // Mirrors migration 029 (shop availability and queue estimate).
+  await pool.query(`
+    ALTER TABLE shops ADD COLUMN IF NOT EXISTS is_open BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE shops ADD COLUMN IF NOT EXISTS open_status_updated_at TIMESTAMP;
+    ALTER TABLE shops ADD COLUMN IF NOT EXISTS queue_count INTEGER;
+    ALTER TABLE shops ADD COLUMN IF NOT EXISTS queue_updated_at TIMESTAMP;
+  `);
+  await pool.query(`
+    DO $$ BEGIN
+      ALTER TABLE shops ADD CONSTRAINT shops_queue_count_range
+        CHECK (queue_count IS NULL OR (queue_count >= 0 AND queue_count <= 500));
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END $$;
+  `);
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS ration_cards (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -212,6 +227,18 @@ const createSchema = async () => {
   await pool.query(`
     ALTER TABLE dispense_sessions ADD COLUMN IF NOT EXISTS qr_session_id VARCHAR(150)
       REFERENCES qr_sessions(session_id) ON DELETE RESTRICT;
+  `);
+
+  // Mirrors migration 028 (QR reservation, captured measurement, and the
+  // one-live-session-per-QR-commodity guard).
+  await pool.query(`
+    ALTER TABLE qr_sessions ADD COLUMN IF NOT EXISTS reserved_at TIMESTAMP;
+    ALTER TABLE qr_sessions ADD COLUMN IF NOT EXISTS reserved_until TIMESTAMP;
+    ALTER TABLE dispense_sessions ADD COLUMN IF NOT EXISTS measured_grams INTEGER;
+    CREATE UNIQUE INDEX IF NOT EXISTS dispense_sessions_qr_commodity_live_unique
+      ON dispense_sessions (qr_session_id, commodity)
+      WHERE qr_session_id IS NOT NULL
+        AND state IN ('active','attached','weighing','confirming','captured','committed');
   `);
 
   await pool.query(`
