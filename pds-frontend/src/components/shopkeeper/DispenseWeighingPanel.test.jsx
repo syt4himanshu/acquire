@@ -557,3 +557,117 @@ describe("DispenseWeighingPanel", () => {
     expect(await axe(container)).toHaveNoViolations();
   });
 });
+
+// PROTOTYPE: Finish is enabled from a single fresh in-range reading while the
+// session is 'weighing', without waiting for the multi-sample 'confirming'
+// state. Covers rice and wheat, since both use this component.
+describe.each([
+  { commodity: "rice", label: "rice", entitledGrams: 1000, toleranceGrams: 20 },
+  { commodity: "wheat", label: "wheat", entitledGrams: 1500, toleranceGrams: 25 },
+])("DispenseWeighingPanel immediate Finish ($commodity)", ({ commodity, label, entitledGrams, toleranceGrams }) => {
+  const props = {
+    sessionId: "test-session-123",
+    commodity,
+    entitledGrams,
+    toleranceGrams,
+    beneficiaryName: "Test Beneficiary",
+    cardNumber: "CARD123456",
+    onDone: vi.fn(),
+  };
+  const finishButton = () =>
+    screen.getByRole("button", { name: new RegExp(`Finish ${label}`, "i") });
+
+  it("enables Finish from one fresh in-range reading in the weighing state", async () => {
+    render(<DispenseWeighingPanel {...props} />);
+    await waitFor(() => expect(mockWsInstance).not.toBeNull());
+
+    mockWsInstance.simulateMessage({ type: "state", state: "weighing" });
+    mockWsInstance.simulateMessage({ type: "reading", gramsInt: entitledGrams + 6 });
+
+    await waitFor(() => expect(finishButton()).not.toBeDisabled());
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Weight in range — ready to finish",
+    );
+  });
+
+  it("keeps Finish disabled and shows Stabilizing while the session is not yet capturable", async () => {
+    render(<DispenseWeighingPanel {...props} />);
+    await waitFor(() => expect(mockWsInstance).not.toBeNull());
+
+    mockWsInstance.simulateMessage({ type: "reading", gramsInt: entitledGrams + 6 });
+
+    await waitFor(() => expect(screen.getByText("Stabilizing...")).toBeInTheDocument());
+    expect(finishButton()).toBeDisabled();
+  });
+
+  it("keeps Finish disabled for a reading just outside tolerance", async () => {
+    render(<DispenseWeighingPanel {...props} />);
+    await waitFor(() => expect(mockWsInstance).not.toBeNull());
+
+    mockWsInstance.simulateMessage({ type: "state", state: "weighing" });
+    mockWsInstance.simulateMessage({
+      type: "reading",
+      gramsInt: entitledGrams + toleranceGrams + 1,
+    });
+
+    await waitFor(() => expect(finishButton()).toBeDisabled());
+    expect(screen.getByRole("status")).not.toHaveTextContent(
+      "ready to finish",
+    );
+  });
+
+  it("disables Finish once an in-range reading goes stale", async () => {
+    vi.useFakeTimers();
+    render(<DispenseWeighingPanel {...props} />);
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+
+    mockWsInstance.simulateMessage({ type: "state", state: "weighing" });
+    mockWsInstance.simulateMessage({ type: "reading", gramsInt: entitledGrams });
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    expect(finishButton()).not.toBeDisabled();
+
+    await act(async () => vi.advanceTimersByTimeAsync(3500));
+    expect(finishButton()).toBeDisabled();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Waiting for fresh reading",
+    );
+  });
+
+  it("disables Finish when the live connection drops", async () => {
+    render(<DispenseWeighingPanel {...props} />);
+    await waitFor(() => expect(mockWsInstance).not.toBeNull());
+
+    mockWsInstance.simulateMessage({ type: "state", state: "weighing" });
+    mockWsInstance.simulateMessage({ type: "reading", gramsInt: entitledGrams });
+    await waitFor(() => expect(finishButton()).not.toBeDisabled());
+
+    mockWsInstance.close();
+    await waitFor(() => expect(finishButton()).toBeDisabled());
+  });
+
+  it("disables Finish for a zero reading, even if the target is never zero", async () => {
+    render(<DispenseWeighingPanel {...props} />);
+    await waitFor(() => expect(mockWsInstance).not.toBeNull());
+
+    mockWsInstance.simulateMessage({ type: "state", state: "weighing" });
+    mockWsInstance.simulateMessage({ type: "reading", gramsInt: 0 });
+
+    await waitFor(() => expect(finishButton()).toBeDisabled());
+  });
+
+  it("disables Finish for a sensor fault even with an in-range reading", async () => {
+    render(<DispenseWeighingPanel {...props} />);
+    await waitFor(() => expect(mockWsInstance).not.toBeNull());
+
+    mockWsInstance.simulateMessage({ type: "state", state: "weighing" });
+    mockWsInstance.simulateMessage({ type: "reading", gramsInt: entitledGrams });
+    await waitFor(() => expect(finishButton()).not.toBeDisabled());
+
+    mockWsInstance.simulateMessage({
+      type: "device_error",
+      code: "HX711_NOT_READY",
+      detail: "HX711 is not responding",
+    });
+    await waitFor(() => expect(finishButton()).toBeDisabled());
+  });
+});

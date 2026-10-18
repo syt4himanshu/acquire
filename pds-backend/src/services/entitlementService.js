@@ -80,13 +80,19 @@ const runEntitlementAllocation = async (options = {}) => {
     if (!previewOnly) {
       await client.query("BEGIN");
 
+      // Upsert, not UPDATE: a card that has no wallet yet (e.g. one created
+      // outside the admin paths) gets one here instead of being skipped
+      // silently. ration_card_id is unique, so re-running cannot duplicate it.
       for (const allocation of allocations) {
         await client.query(
-          `UPDATE wallets
-           SET rice_balance_kg = $1, wheat_balance_kg = $2,
-               last_reset_date = CURRENT_DATE, updated_at = NOW()
-           WHERE ration_card_id = $3`,
-          [allocation.rice_kg, allocation.wheat_kg, allocation.ration_card_id],
+          `INSERT INTO wallets (ration_card_id, rice_balance_kg, wheat_balance_kg, last_reset_date, updated_at)
+           VALUES ($1, $2, $3, CURRENT_DATE, NOW())
+           ON CONFLICT (ration_card_id) DO UPDATE
+           SET rice_balance_kg = EXCLUDED.rice_balance_kg,
+               wheat_balance_kg = EXCLUDED.wheat_balance_kg,
+               last_reset_date = CURRENT_DATE,
+               updated_at = NOW()`,
+          [allocation.ration_card_id, allocation.rice_kg, allocation.wheat_kg],
         );
       }
 

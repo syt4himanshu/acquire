@@ -12,6 +12,7 @@ const {
   getBeneficiaryByRationCardId,
   dispense,
   createTransaction,
+  getTransactionReceipt,
 } = require("../controllers/shopkeeperController");
 const {
   getMyShopStatus,
@@ -27,6 +28,7 @@ router.get("/me", getMe);
 router.get("/beneficiary/:id", getBeneficiaryByRationCardId);
 router.post("/dispense", validate(dispenseSchema), dispense);
 router.post("/transactions", validate(transactionSchema), createTransaction);
+router.get("/transactions/:id/receipt", getTransactionReceipt);
 router.get("/shop-status", getMyShopStatus);
 router.put("/shop-status/open", validate(openStatusSchema), updateMyOpenStatus);
 router.put("/shop-status/queue", validate(queueCountSchema), updateMyQueueCount);

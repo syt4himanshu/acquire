@@ -60,6 +60,13 @@ module.exports = {
     // breaks before this elapses).
     CONFIRM_COUNTDOWN_MS: 3_000,
 
+    // Prototype single-reading capture (captureMeasurement). A capture may be
+    // closed from a single reading, but only if that reading is recent. The
+    // newest reading must be no older than this...
+    CAPTURE_MAX_READING_AGE_MS: 3_000,
+    // ...and no more than this far in the future (bridge and PC clock skew).
+    CAPTURE_MAX_CLOCK_SKEW_MS: 1_000,
+
     // Phase 3 — device fleet "stale" threshold: no live WS connection, but
     // last_seen_at is more recent than this -> likely mid-reconnect rather
     // than genuinely offline.

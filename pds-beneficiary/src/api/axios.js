@@ -54,12 +54,24 @@ api.interceptors.request.use(async (config) => {
 api.interceptors.response.use(
   (res) => res,
   async (error) => {
+    if (__DEV__) {
+      // Method, path, status and error code only. Headers, request bodies and
+      // response bodies are never logged, so tokens and OTPs stay out of the console.
+      const method = error.config?.method?.toUpperCase() ?? "?";
+      const path = error.config?.url ?? "(unknown path)";
+      const status = error.response?.status ?? "no response";
+      console.warn(`[api] ${method} ${path} -> ${status}${error.code ? ` (${error.code})` : ""}`);
+    }
     if (error.response?.status === 401) {
       await AsyncStorage.removeItem("token");
     }
     return Promise.reject(error);
   },
 );
+
+if (__DEV__) {
+  console.log(`[api] base URL: ${baseURL}`);
+}
 
 export const resolvedApiBaseUrl = baseURL;
 

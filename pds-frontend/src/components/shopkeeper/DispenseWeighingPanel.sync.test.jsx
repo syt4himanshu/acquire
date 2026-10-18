@@ -87,15 +87,25 @@ describe("DispenseWeighingPanel — state synchronisation", () => {
     expect(finishButton()).toBeEnabled();
   });
 
-  it("does not enable Finish from a reading alone while the session is still weighing", async () => {
+  it("enables Finish from a single in-range reading while the session is weighing (prototype)", async () => {
     api.get.mockResolvedValue(serverState("weighing"));
     render(<DispenseWeighingPanel {...props()} />);
     act(() => sockets[0].open());
     await flush();
 
     act(() => sockets[0].emit({ type: "reading", gramsInt: 3000 }));
+    expect(finishButton()).toBeEnabled();
+    expect(screen.getByRole("status")).toHaveTextContent("Weight in range — ready to finish");
+  });
+
+  it("keeps Finish disabled for an in-range reading while the session is still attached", async () => {
+    api.get.mockResolvedValue(serverState("attached"));
+    render(<DispenseWeighingPanel {...props()} />);
+    act(() => sockets[0].open());
+    await flush();
+
+    act(() => sockets[0].emit({ type: "reading", gramsInt: 3000 }));
     expect(finishButton()).toBeDisabled();
-    expect(screen.getByRole("status")).toHaveTextContent(/Waiting|Stabilizing|Place|Add|Remove|Weight/);
   });
 
   it("fetches the authoritative status on every connection, including a reconnect", async () => {
@@ -343,7 +353,7 @@ describe("DispenseWeighingPanel — temporary weighing debug logs", () => {
 });
 
 describe("DispenseWeighingPanel — gate breakdown matches the reported case", () => {
-  it("with 999 g vs 1000 g target, fresh and in tolerance, but still weighing: only stateIsConfirming is false", async () => {
+  it("with 999 g vs 1000 g target, fresh and in tolerance, while weighing: every gate passes (prototype)", async () => {
     const spy = vi.spyOn(console, "log").mockImplementation(() => {});
     api.get.mockResolvedValue(serverState("weighing"));
     render(<DispenseWeighingPanel {...props({ entitledGrams: 1000, toleranceGrams: 20 })} />);
@@ -355,9 +365,9 @@ describe("DispenseWeighingPanel — gate breakdown matches the reported case", (
       .filter(([first]) => typeof first === "string" && first.includes("canFinish.evaluate"))
       .map(([, fields]) => fields);
     const last = evaluations[evaluations.length - 1];
-    expect(last).toMatchObject({ sessionState: "weighing", connected: true, measuredGrams: 999, diffGrams: -1, canFinish: false });
+    expect(last).toMatchObject({ sessionState: "weighing", connected: true, measuredGrams: 999, diffGrams: -1, canFinish: true });
     expect(last.gates).toEqual({
-      stateIsConfirming: false,
+      stateCapturable: true,
       wsConnected: true,
       readingFresh: true,
       readingValid: true,
@@ -366,7 +376,7 @@ describe("DispenseWeighingPanel — gate breakdown matches the reported case", (
       notFinishing: true,
       notAlreadyFinished: true,
     });
-    expect(last.reasons).toEqual(["state=weighing"]);
+    expect(last.reasons).toEqual([]);
   });
 });
 

@@ -81,6 +81,28 @@ const scanBeneficiary = async (user) => {
   await screen.findByText("Test Beneficiary");
 };
 
+// The committed receipt, as the backend returns it for transaction tx-final.
+const receiptFixture = {
+  receipt: {
+    reference: "tx-final",
+    issuedAt: "2026-10-18T10:00:00.000Z",
+    status: "completed",
+    shop: { code: "SHOP-1", name: "North Shop" },
+    beneficiary: {
+      name: "Test Beneficiary",
+      maskedCardNumber: "••••••••5678",
+      category: "BPL",
+      familySize: 3,
+    },
+    commodities: [
+      { commodity: "rice", entitledGrams: 3000, measuredGrams: 2995, differenceGrams: -5, toleranceGrams: 30, withinTolerance: true },
+      { commodity: "wheat", entitledGrams: 2000, measuredGrams: 1995, differenceGrams: -5, toleranceGrams: 20, withinTolerance: true },
+    ],
+    totals: { entitledGrams: 5000, measuredGrams: 4990 },
+    blockchain: { status: "pending", txHash: null, explorerUrl: null },
+  },
+};
+
 const createSessionResponse = (url, body) => {
   if (url === "/api/dispense/session") {
     return Promise.resolve({
@@ -122,6 +144,8 @@ describe("Phase 1 shopkeeper measurement flow", () => {
         data:
           url === "/api/shopkeeper/beneficiary/card-123"
             ? beneficiaryData
+            : url.startsWith("/api/shopkeeper/transactions/")
+            ? receiptFixture
             : deviceStatus(),
       }),
     );
@@ -154,6 +178,8 @@ describe("Phase 1 shopkeeper measurement flow", () => {
         data:
           url === "/api/shopkeeper/beneficiary/card-123"
             ? beneficiaryData
+            : url.startsWith("/api/shopkeeper/transactions/")
+            ? receiptFixture
             : deviceStatus(),
       }),
     );
@@ -187,10 +213,10 @@ describe("Phase 1 shopkeeper measurement flow", () => {
     );
 
     expect(
-      await screen.findByRole("heading", { name: "Measurement review" }),
+      await screen.findByRole("heading", {
+        name: "Distribution Completed Successfully",
+      }),
     ).toBeInTheDocument();
-    expect(screen.getByText("2,995 g")).toBeInTheDocument();
-    expect(screen.getByText("1,995 g")).toBeInTheDocument();
     expect(api.post).toHaveBeenCalledWith(
       "/api/shopkeeper/dispense",
       expect.objectContaining({
@@ -199,6 +225,9 @@ describe("Phase 1 shopkeeper measurement flow", () => {
         rice_session_id: "session-rice",
         wheat_session_id: "session-wheat",
       }),
+    );
+    expect(api.get).toHaveBeenCalledWith(
+      "/api/shopkeeper/transactions/tx-final/receipt",
     );
   });
 
@@ -209,6 +238,8 @@ describe("Phase 1 shopkeeper measurement flow", () => {
         data:
           url === "/api/shopkeeper/beneficiary/card-123"
             ? beneficiaryData
+            : url.startsWith("/api/shopkeeper/transactions/")
+            ? receiptFixture
             : deviceStatus(),
       }),
     );
@@ -260,8 +291,78 @@ describe("Phase 1 shopkeeper measurement flow", () => {
     );
     await waitFor(() => expect(distributionAttempts).toBe(2));
     expect(
-      await screen.findByRole("button", { name: "Distribution complete" }),
+      await screen.findByRole("heading", {
+        name: "Distribution Completed Successfully",
+      }),
     ).toBeInTheDocument();
+  });
+
+  it("does not show a receipt while the distribution request is still pending", async () => {
+    const user = userEvent.setup();
+    api.get.mockImplementation((url) =>
+      Promise.resolve({
+        data:
+          url === "/api/shopkeeper/beneficiary/card-123"
+            ? beneficiaryData
+            : url.startsWith("/api/shopkeeper/transactions/")
+            ? receiptFixture
+            : deviceStatus(),
+      }),
+    );
+    let resolveDispense;
+    api.post.mockImplementation((url, body) => {
+      if (url === "/api/shopkeeper/dispense") {
+        return new Promise((resolve) => {
+          resolveDispense = resolve;
+        });
+      }
+      return createSessionResponse(url, body);
+    });
+
+    await scanBeneficiary(user);
+    await user.click(
+      await screen.findByRole("button", { name: /Start rice weighing/i }),
+    );
+    await user.click(
+      await screen.findByRole("button", { name: "Finish rice" }),
+    );
+    const startWheat = await screen.findByRole(
+      "button",
+      { name: /Ready to weigh wheat/i },
+      { timeout: 5000 },
+    );
+    await waitFor(() => expect(startWheat).toBeEnabled(), { timeout: 5000 });
+    await user.click(startWheat);
+    await user.click(
+      await screen.findByRole("button", { name: /Start wheat weighing/i }),
+    );
+    await user.click(
+      await screen.findByRole("button", { name: "Finish wheat" }),
+    );
+
+    await waitFor(() => expect(resolveDispense).toBeDefined());
+    expect(
+      screen.queryByRole("heading", { name: "Distribution Completed Successfully" }),
+    ).not.toBeInTheDocument();
+    expect(api.get).not.toHaveBeenCalledWith(
+      expect.stringContaining("/receipt"),
+    );
+
+    resolveDispense({
+      data: {
+        message: "Dispensed successfully",
+        transaction: { id: "tx-final" },
+        dispensed: { rice_qty_kg: 3, wheat_qty_kg: 2 },
+      },
+    });
+    expect(
+      await screen.findByRole("heading", {
+        name: "Distribution Completed Successfully",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      api.post.mock.calls.filter(([url]) => url === "/api/shopkeeper/dispense"),
+    ).toHaveLength(1);
   });
 
   it("does not advance or mark a commodity complete when its weighing is cancelled", async () => {
@@ -271,6 +372,8 @@ describe("Phase 1 shopkeeper measurement flow", () => {
         data:
           url === "/api/shopkeeper/beneficiary/card-123"
             ? beneficiaryData
+            : url.startsWith("/api/shopkeeper/transactions/")
+            ? receiptFixture
             : deviceStatus(),
       }),
     );

@@ -1,5 +1,6 @@
 const pool = require("../config/db");
 const crypto = require("crypto");
+const { gramsToKg } = require("../services/allocationPolicyService");
 
 const toNumber = (v) => Number.parseFloat(v || 0);
 
@@ -14,10 +15,12 @@ const getMe = async (req, res, next) => {
         rc.id AS ration_card_id,
         rc.card_number,
         rc.category,
+        rc.is_active,
         fm.name AS head_name,
         u.mobile,
         s.shop_name,
-        a.name AS area_name
+        a.name AS area_name,
+        (SELECT COUNT(*) FROM family_members fm_c WHERE fm_c.ration_card_id = rc.id)::int AS family_size
       FROM family_members fm
       JOIN ration_cards rc ON rc.id = fm.ration_card_id
       JOIN users u ON u.id = fm.user_id
@@ -40,32 +43,71 @@ const getMe = async (req, res, next) => {
 };
 
 // GET /api/beneficiary/wallet
+//
+// Response contract:
+//   200 { wallet: {rice_balance_kg, wheat_balance_kg, last_reset_date}, allocation_status: "ok", entitlement }
+//   200 { wallet: null, allocation_status: "not_provisioned", entitlement }   card exists, no wallet row yet
+//   404 { error: "Ration card not found" }                                      caller has no head-of-family card
+//
+// `entitlement` is the card's policy allocation in kg. It is returned even when
+// no wallet exists, so the app can show what the month's allocation should be.
+// A missing wallet is reported as `not_provisioned`, never as a zero balance.
 const getWallet = async (req, res, next) => {
     try {
         const userId = req.user.id;
 
-        const result = await pool.query(
-            `
-      SELECT w.rice_balance_kg, w.wheat_balance_kg
-      FROM wallets w
-      JOIN ration_cards rc ON rc.id = w.ration_card_id
-      JOIN family_members fm ON fm.ration_card_id = rc.id
-      WHERE fm.user_id = $1 AND fm.is_head = true
-      LIMIT 1
-      `,
+        const cardResult = await pool.query(
+            `SELECT rc.id AS ration_card_id
+       FROM ration_cards rc
+       JOIN family_members fm ON fm.ration_card_id = rc.id
+       WHERE fm.user_id = $1 AND fm.is_head = true
+       LIMIT 1`,
             [userId],
         );
 
-        if (result.rows.length === 0) {
-            return res.status(404).json({ error: "Wallet not found" });
+        if (cardResult.rows.length === 0) {
+            return res.status(404).json({ error: "Ration card not found" });
         }
 
+        const result = await pool.query(
+            `SELECT
+         w.rice_balance_kg,
+         w.wheat_balance_kg,
+         to_char(w.last_reset_date, 'YYYY-MM-DD') AS last_reset_date,
+         p.rice_per_card_grams,
+         p.wheat_per_card_grams
+       FROM ration_cards rc
+       LEFT JOIN wallets w ON w.ration_card_id = rc.id
+       LEFT JOIN policies p ON p.category = rc.category
+       WHERE rc.id = $1`,
+            [cardResult.rows[0].ration_card_id],
+        );
+
         const row = result.rows[0];
+        const entitlement =
+            row.rice_per_card_grams == null || row.wheat_per_card_grams == null
+                ? null
+                : {
+                      rice_kg: gramsToKg(row.rice_per_card_grams),
+                      wheat_kg: gramsToKg(row.wheat_per_card_grams),
+                  };
+
+        if (row.rice_balance_kg == null) {
+            return res.status(200).json({
+                wallet: null,
+                allocation_status: "not_provisioned",
+                entitlement,
+            });
+        }
+
         return res.status(200).json({
             wallet: {
                 rice_balance_kg: toNumber(row.rice_balance_kg),
                 wheat_balance_kg: toNumber(row.wheat_balance_kg),
+                last_reset_date: row.last_reset_date,
             },
+            allocation_status: "ok",
+            entitlement,
         });
     } catch (err) {
         return next(err);

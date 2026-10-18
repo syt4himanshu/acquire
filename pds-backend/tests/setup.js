@@ -100,6 +100,11 @@ const createSchema = async () => {
       created_at TIMESTAMP DEFAULT NOW()
     )
   `);
+  // Added to the dev database by scripts/patch_family_relationship.js, not by a
+  // migration, so the test harness needs it mirrored here.
+  await pool.query(`ALTER TABLE family_members ADD COLUMN IF NOT EXISTS relationship VARCHAR(50)`);
+  // Same situation: added by scripts/patch_gender_address.js.
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS gender VARCHAR(10)`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS wallets (

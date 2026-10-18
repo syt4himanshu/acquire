@@ -1,15 +1,17 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useLocation } from 'react-router-dom';
-import { Users } from 'lucide-react';
+import { Users, X } from 'lucide-react';
 import api from '../../api/axios';
 import PanelHeader from '../../design/primitives/PanelHeader';
 import Table from '../../components/ui/Table';
 import Badge from '../../components/ui/Badge';
 import EmptyState from '../../components/ui/EmptyState';
+import Input from '../../components/ui/Input';
 import Pagination from '../../components/ui/Pagination';
 import Select from '../../components/ui/Select';
 
 const PAGE_SIZE = 50;
+const SEARCH_DEBOUNCE_MS = 300;
 
 const COLUMNS = [
   { label: 'Name' },
@@ -40,6 +42,7 @@ const Beneficiaries = () => {
   const [areas, setAreas] = useState([]);
   const [shops, setShops] = useState([]);
   const [total, setTotal] = useState(0);
+  const [scopeTotal, setScopeTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [page, setPage] = useState(1);
@@ -48,6 +51,10 @@ const Beneficiaries = () => {
     area_id: location.state?.area_id || '',
     shop_id: '',
   });
+  // searchInput is what the admin is typing; search is the debounced value that
+  // actually hits the API.
+  const [searchInput, setSearchInput] = useState('');
+  const [search, setSearch] = useState('');
 
   useEffect(() => {
     const fetchFilterData = async () => {
@@ -68,48 +75,102 @@ const Beneficiaries = () => {
   }, []);
 
   useEffect(() => {
+    const timer = setTimeout(() => {
+      setSearch(searchInput.trim());
+      setPage(1);
+    }, SEARCH_DEBOUNCE_MS);
+
+    return () => clearTimeout(timer);
+  }, [searchInput]);
+
+  useEffect(() => {
+    let ignore = false;
+
     const fetchBeneficiaries = async () => {
       setLoading(true);
       setError('');
 
       try {
-        const params = {};
+        const params = { page, limit: PAGE_SIZE };
         if (filters.category) params.category = filters.category;
         if (filters.area_id) params.area_id = filters.area_id;
         if (filters.shop_id) params.shop_id = filters.shop_id;
+        if (search) params.search = search;
 
         const response = await api.get('/api/admin/beneficiaries', { params });
+        if (ignore) return;
+
         const payload = response.data || {};
+        const pagination = payload.pagination || {};
         setBeneficiaries(payload.beneficiaries || payload.data || []);
-        setTotal(payload.total || payload.pagination?.total || 0);
-        setPage(1);
+        setTotal(payload.total || pagination.total || 0);
+        setScopeTotal(pagination.unfiltered_total ?? pagination.total ?? 0);
       } catch (fetchError) {
+        if (ignore) return;
         setError(fetchError.response?.data?.error || 'Failed to load beneficiaries');
         setBeneficiaries([]);
         setTotal(0);
+        setScopeTotal(0);
       } finally {
-        setLoading(false);
+        if (!ignore) setLoading(false);
       }
     };
 
     fetchBeneficiaries();
-  }, [filters]);
 
-  const totalPages = Math.max(1, Math.ceil(beneficiaries.length / PAGE_SIZE));
-  const pageRows = useMemo(
-    () => beneficiaries.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE),
-    [beneficiaries, page]
-  );
+    return () => {
+      ignore = true;
+    };
+  }, [filters, search, page]);
+
+  const setFilter = (key, value) => {
+    setFilters((prev) => ({ ...prev, [key]: value }));
+    setPage(1);
+  };
+
+  const clearSearch = () => {
+    setSearchInput('');
+    setSearch('');
+    setPage(1);
+  };
+
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   return (
     <>
       <PanelHeader title="Beneficiaries" />
       <div className="space-y-4">
       <div className="flex flex-wrap gap-3">
+        <div role="search" className="relative w-full sm:w-80">
+          <Input
+            type="text"
+            aria-label="Search beneficiaries"
+            placeholder="Search by name, mobile, or ration card number..."
+            value={searchInput}
+            onChange={(event) => setSearchInput(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Escape' && searchInput) clearSearch();
+            }}
+            autoComplete="off"
+            spellCheck={false}
+            inputClassName="pr-9"
+          />
+          {searchInput && (
+            <button
+              type="button"
+              onClick={clearSearch}
+              aria-label="Clear search"
+              className="absolute right-2 top-1/2 -translate-y-1/2 rounded-sm p-1 text-text-secondary transition hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
+            >
+              <X size={14} aria-hidden="true" />
+            </button>
+          )}
+        </div>
+
         <Select
           className="w-48"
           value={filters.category}
-          onChange={(event) => setFilters((prev) => ({ ...prev, category: event.target.value }))}
+          onChange={(event) => setFilter('category', event.target.value)}
         >
           <option value="">All Categories</option>
           <option value="APL">APL</option>
@@ -120,7 +181,7 @@ const Beneficiaries = () => {
         <Select
           className="w-48"
           value={filters.area_id}
-          onChange={(event) => setFilters((prev) => ({ ...prev, area_id: event.target.value }))}
+          onChange={(event) => setFilter('area_id', event.target.value)}
         >
           <option value="">All Areas</option>
           {areas.map((area) => (
@@ -133,7 +194,7 @@ const Beneficiaries = () => {
         <Select
           className="w-48"
           value={filters.shop_id}
-          onChange={(event) => setFilters((prev) => ({ ...prev, shop_id: event.target.value }))}
+          onChange={(event) => setFilter('shop_id', event.target.value)}
         >
           <option value="">All Shops</option>
           {shops.map((shop) => (
@@ -143,7 +204,9 @@ const Beneficiaries = () => {
           ))}
         </Select>
 
-        <Badge className="self-center">Showing {total} beneficiaries</Badge>
+        <Badge className="self-center" role="status">
+          {search ? `Showing ${total} of ${scopeTotal} beneficiaries` : `Showing ${total} beneficiaries`}
+        </Badge>
       </div>
 
       {error && <Badge status="danger">{error}</Badge>}
@@ -163,10 +226,17 @@ const Beneficiaries = () => {
             <Table.LoadingRows rows={6} columns={COLUMNS.length} />
           ) : beneficiaries.length === 0 ? (
             <Table.Empty colSpan={COLUMNS.length}>
-              <EmptyState icon={<Users size={20} />} title="No beneficiaries found" description="Try adjusting your filters." />
+              {search ? (
+                <EmptyState
+                  icon={<Users size={20} />}
+                  title="No beneficiaries found. Try a different name, mobile number, or card number."
+                />
+              ) : (
+                <EmptyState icon={<Users size={20} />} title="No beneficiaries found" description="Try adjusting your filters." />
+              )}
             </Table.Empty>
           ) : (
-            pageRows.map((item, index) => (
+            beneficiaries.map((item, index) => (
               <Table.Row key={`${item.card_number}-${index}`}>
                 <Table.Cell>
                   {item.name || <span className="italic text-text-secondary">Name unavailable</span>}

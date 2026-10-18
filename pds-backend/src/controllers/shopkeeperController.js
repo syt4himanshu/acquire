@@ -1,4 +1,5 @@
 const pool = require("../config/db");
+const receiptService = require("../services/receiptService");
 const logger = require("../config/logger");
 const { recordDispense } = require("../services/blockchainService");
 const { buildRowHash } = require("../services/chainRowBuilder");
@@ -821,10 +822,32 @@ const createTransaction = async (req, res, next) => {
   }
 };
 
+// GET /api/shopkeeper/transactions/:id/receipt — read-only receipt of a
+// distribution this shop committed. Shop-scoped, so another shop's transaction
+// is reported as not found.
+const getTransactionReceipt = async (req, res, next) => {
+  try {
+    const shop = await getAssignedShop(pool, req.user.id);
+    if (!shop) {
+      return res.status(404).json({ error: "No active shop assigned" });
+    }
+
+    const receipt = await receiptService.getShopReceipt(req.params.id, shop.id);
+    if (!receipt) {
+      return res.status(404).json({ error: "Receipt not found" });
+    }
+
+    return res.status(200).json({ receipt });
+  } catch (err) {
+    return next(err);
+  }
+};
+
 module.exports = {
   getMe,
   getBeneficiaryByRationCardId,
   dispense,
   createTransaction,
+  getTransactionReceipt,
   getAssignedShop,
 };

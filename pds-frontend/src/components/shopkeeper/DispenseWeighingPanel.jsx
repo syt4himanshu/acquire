@@ -26,6 +26,9 @@ const TERMINAL_STATES = [
 // result modal).
 const NO_RECONNECT_STATES = [...TERMINAL_STATES, "captured"];
 
+// Sessions the server will accept a capture from (see captureMeasurement).
+const CAPTURABLE_STATES = ["weighing", "confirming"];
+
 const resolveWsUrl = () => {
   const base =
     resolvedApiBaseUrl ||
@@ -378,8 +381,13 @@ const DispenseWeighingPanel = ({
   const isValidReading =
     Number.isFinite(gramsInt) && gramsInt >= 0 && gramsInt <= MAX_VALID_GRAMS;
   const isWithinTolerance = isValidReading && absDiff <= toleranceGrams;
+  // PROTOTYPE: Finish is enabled as soon as a fresh, valid reading is within
+  // tolerance, while the session is 'weighing' or already 'confirming'. This
+  // skips the multi-sample stability wait, so it is less reliable than a
+  // confirmed stable weight. The server re-checks freshness, validity and
+  // tolerance on capture, so this gate only controls the button.
   const canFinish =
-    sessionState === "confirming" &&
+    CAPTURABLE_STATES.includes(sessionState) &&
     connected &&
     isFreshReading &&
     isWithinTolerance &&
@@ -389,7 +397,7 @@ const DispenseWeighingPanel = ({
 
   // Every reason canFinish is false right now, for the debug log.
   const disabledReasons = [];
-  if (sessionState !== "confirming") disabledReasons.push(`state=${sessionState}`);
+  if (!CAPTURABLE_STATES.includes(sessionState)) disabledReasons.push(`state=${sessionState}`);
   if (!connected) disabledReasons.push("ws=disconnected");
   if (!isFreshReading) disabledReasons.push("reading=not_fresh");
   if (!isValidReading) disabledReasons.push(`reading=invalid(${gramsInt})`);
@@ -403,7 +411,7 @@ const DispenseWeighingPanel = ({
   // TEMPORARY: each canFinish gate as its own boolean, so the log shows exactly
   // which one is false. Same inputs as canFinish above.
   const gateBreakdown = {
-    stateIsConfirming: sessionState === "confirming",
+    stateCapturable: CAPTURABLE_STATES.includes(sessionState),
     wsConnected: connected,
     readingFresh: isFreshReading,
     readingValid: isValidReading,
@@ -471,6 +479,8 @@ const DispenseWeighingPanel = ({
     stateText = !connected ? "Reconnecting…" : "Waiting for fresh reading";
   } else if (sessionState === "confirming" && isWithinTolerance) {
     stateText = "✓ Weight Stable";
+  } else if (canFinish) {
+    stateText = "Weight in range — ready to finish";
   } else if (!isFreshReading) {
     stateText = "Waiting for fresh reading";
   } else if (Math.abs(diff) > toleranceGrams) {

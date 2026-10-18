@@ -4,6 +4,7 @@ import { Gauge, WifiOff } from "lucide-react";
 import api from "../../api/axios";
 import QRScanner from "../../components/shopkeeper/QRScanner";
 import DispenseWeighingPanel from "../../components/shopkeeper/DispenseWeighingPanel";
+import DistributionReceipt from "../../components/shopkeeper/DistributionReceipt";
 import useToast from "../../components/ui/useToast";
 import Card from "../../components/ui/Card";
 import Button from "../../components/ui/Button";
@@ -102,6 +103,9 @@ const ScanAndDispense = () => {
   const [zeroReadings, setZeroReadings] = useState([]);
   const activeSessionIdRef = useRef(null);
   const tareRequiredRef = useRef(false);
+  // True from the moment a finalize request is sent until it settles. Stops a
+  // second request while the first is in flight, even before React re-renders.
+  const finalizeInFlightRef = useRef(false);
 
   useEffect(
     () => () => {
@@ -349,6 +353,8 @@ const ScanAndDispense = () => {
     }
 
     const finalizeDistribution = async () => {
+      if (finalizeInFlightRef.current) return;
+      finalizeInFlightRef.current = true;
       setIsFinalizingDistribution(true);
       try {
         const payload = {
@@ -370,6 +376,7 @@ const ScanAndDispense = () => {
         setFinalizeError(message);
         toast.danger(message);
       } finally {
+        finalizeInFlightRef.current = false;
         setIsFinalizingDistribution(false);
       }
     };
@@ -398,6 +405,17 @@ const ScanAndDispense = () => {
     setQrPayload(parsed.payload);
     fetchBeneficiary(parsed.payload);
   };
+
+  // The receipt replaces the workflow only once finalize has returned a
+  // committed transaction (distributionResult is set in the success path only).
+  if (distributionResult) {
+    return (
+      <DistributionReceipt
+        transactionId={distributionResult.transaction?.id}
+        onBackToDashboard={() => navigate("/shopkeeper/dashboard")}
+      />
+    );
+  }
 
   return (
     <div className="mx-auto max-w-3xl space-y-4">

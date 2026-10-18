@@ -6,7 +6,9 @@ const { buildRowHash } = require("./chainRowBuilder");
 const { enqueueAnchor } = require("./anchorEnqueuer");
 const dispenseSessionBus = require("./dispenseSessionBus");
 const stabilityDetectorService = require("./stabilityDetectorService");
-const { STABILITY_WINDOW_MS } = require("../config/iot");
+
+// States from which a measurement may be captured. See captureMeasurement.
+const CAPTURABLE_SESSION_STATES = ["weighing", "confirming"];
 const {
   MAX_DISPENSE_TRANSACTION_GRAMS,
   getCardAllocation,
@@ -557,8 +559,11 @@ const cancelSession = async (sessionId, shopId) => {
   return { ok: true, sessionId, state: "cancelled" };
 };
 
-// Phase 1 capture: validate and freeze a stable physical measurement, then
-// close only the weighing session. This deliberately does not call commitSession,
+// Phase 1 capture: validate and freeze a physical measurement, then close only
+// the weighing session. PROTOTYPE: the measurement is the newest reading for the
+// session, accepted only if it is fresh, valid and within tolerance. It is not
+// the multi-sample stability check, so it is less reliable than a confirmed
+// 'confirming' state. This deliberately does not call commitSession,
 // create a dispense_record, debit a wallet, or create a ration transaction.
 const captureMeasurement = async (sessionId, shopId) => {
   const client = await pool.connect();
@@ -590,72 +595,81 @@ const captureMeasurement = async (sessionId, shopId) => {
         message: "Session belongs to another shop",
       };
     }
-    if (session.state !== "confirming") {
+    // Capturable from 'weighing' (prototype: a single fresh in-range reading)
+    // or 'confirming' (the multi-sample stability rule already passed). The
+    // row lock above serialises concurrent captures: the second one reads
+    // 'captured' here and is refused.
+    if (!CAPTURABLE_SESSION_STATES.includes(session.state)) {
       await client.query("ROLLBACK");
       return {
         ok: false,
         status: 409,
         code: "IOT_MEASUREMENT_NOT_STABLE",
-        message:
-          "The scale reading is not currently stable and within tolerance",
+        message: "This session is not open for a scale measurement",
       };
     }
 
-    const readingsResult = await client.query(
+    // Only the newest reading for THIS session is judged. Readings from other
+    // sessions or devices never reach this check, because sensor_readings is
+    // stamped with session_id at ingestion.
+    const latestResult = await client.query(
       `SELECT grams_int, taken_at FROM sensor_readings
-         WHERE session_id = $1 AND taken_at >= NOW() - INTERVAL '1 millisecond' * $2
-         ORDER BY taken_at DESC`,
-      [sessionId, STABILITY_WINDOW_MS],
+         WHERE session_id = $1
+         ORDER BY taken_at DESC
+         LIMIT 1`,
+      [sessionId],
     );
     const nowMs = Date.now();
-    const readings = readingsResult.rows.map((reading) => ({
-      gramsInt: Number(reading.grams_int),
-      takenAtMs: new Date(reading.taken_at).getTime(),
-    }));
+    const latest = latestResult.rows[0]
+      ? {
+          gramsInt: Number(latestResult.rows[0].grams_int),
+          takenAtMs: new Date(latestResult.rows[0].taken_at).getTime(),
+        }
+      : null;
 
-    if (
-      !stabilityDetectorService.isStable(
-        readings,
-        Number(session.entitled_grams),
-        Number(session.tolerance_grams),
-      )
-    ) {
+    const check = stabilityDetectorService.evaluateCaptureReading(
+      latest,
+      nowMs,
+      Number(session.entitled_grams),
+      Number(session.tolerance_grams),
+    );
+    if (!check.ok) {
+      await client.query("ROLLBACK");
+      return {
+        ok: false,
+        status: 409,
+        code: check.code,
+        message: check.message,
+      };
+    }
+
+    const measuredGrams = check.grams;
+
+    // The frozen measurement is stored on the session so the final distribution
+    // reads what was captured, not a figure the client sends back. The state
+    // guard in WHERE makes this atomic with the check above: a session that
+    // changed under us is not captured.
+    const captured = await client.query(
+      `UPDATE dispense_sessions SET state = 'captured', measured_grams = $3
+         WHERE id = $1 AND shop_id = $2 AND state IN ('weighing', 'confirming')`,
+      [sessionId, shopId, measuredGrams],
+    );
+    if (captured.rowCount !== 1) {
       await client.query("ROLLBACK");
       return {
         ok: false,
         status: 409,
         code: "IOT_MEASUREMENT_NOT_STABLE",
-        message:
-          "The scale reading is stale, unstable, or outside the allowed tolerance",
+        message: "This session is not open for a scale measurement",
       };
     }
-
-    const freshReadings = stabilityDetectorService.filterToWindow(
-      readings,
-      nowMs,
-      STABILITY_WINDOW_MS,
-    );
-    const measuredGrams = Math.round(
-      freshReadings.reduce((sum, reading) => sum + reading.gramsInt, 0) /
-        freshReadings.length,
-    );
-
-    // The frozen measurement is stored on the session so the final distribution
-    // reads what was captured, not a figure the client sends back.
-    const captured = await client.query(
-      `UPDATE dispense_sessions SET state = 'captured', measured_grams = $3
-         WHERE id = $1 AND shop_id = $2 AND state = 'confirming'`,
-      [sessionId, shopId, measuredGrams],
-    );
     await client.query("COMMIT");
 
-    if (captured.rowCount === 1) {
-      dispenseSessionBus.publish(sessionId, {
-        type: "state",
-        state: "captured",
-        measuredGrams,
-      });
-    }
+    dispenseSessionBus.publish(sessionId, {
+      type: "state",
+      state: "captured",
+      measuredGrams,
+    });
 
     return {
       ok: true,

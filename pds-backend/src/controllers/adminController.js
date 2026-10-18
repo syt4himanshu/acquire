@@ -165,37 +165,74 @@ const createRationCard = async (req, res, next) => {
 // are kept in the database; this only filters the admin views.
 const EXCLUDE_DEMO_FIXTURES_SQL = "rc.card_number NOT LIKE 'DEMO-AUDIT-%'";
 
+// Head name and mobile are read from the card's head member (see the select
+// below), so the search must match those same columns to agree with what the
+// table shows.
+const HEAD_JOINS_SQL = `
+  LEFT JOIN family_members fm_head ON fm_head.ration_card_id = rc.id AND fm_head.is_head = true
+  LEFT JOIN users u  ON u.id  = fm_head.user_id`;
+
+const SEARCH_MAX_LENGTH = 100;
+const MAX_LIMIT = 500;
+
+// Escapes LIKE wildcards so the search text matches literally, then wraps it for
+// a partial match. The result is still passed as a bound parameter, never
+// concatenated into the SQL.
+const toContainsPattern = (term) => `%${term.replace(/[\\%_]/g, "\\$&")}%`;
+
 const getBeneficiaries = async (req, res, next) => {
   try {
     const { category, area_id, shop_id } = req.query;
+    const search = String(req.query.search || "").trim().slice(0, SEARCH_MAX_LENGTH);
     const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 20;
+    const limit = Math.min(parseInt(req.query.limit) || 20, MAX_LIMIT);
     const offset = (page - 1) * limit;
 
-    const params = [];
-    const filters = [EXCLUDE_DEMO_FIXTURES_SQL];
+    // Category/area/shop filters only. This is the set the admin is scoping to,
+    // before the free-text search narrows it further.
+    const scopeParams = [];
+    const scopeFilters = [EXCLUDE_DEMO_FIXTURES_SQL];
 
     if (category) {
-      params.push(category);
-      filters.push(`rc.category = $${params.length}`);
+      scopeParams.push(category);
+      scopeFilters.push(`rc.category = $${scopeParams.length}`);
     }
     if (area_id) {
-      params.push(area_id);
-      filters.push(`rc.area_id = $${params.length}`);
+      scopeParams.push(area_id);
+      scopeFilters.push(`rc.area_id = $${scopeParams.length}`);
     }
     if (shop_id) {
-      params.push(shop_id);
-      filters.push(`rc.shop_id = $${params.length}`);
+      scopeParams.push(shop_id);
+      scopeFilters.push(`rc.shop_id = $${scopeParams.length}`);
     }
 
-    const whereClause =
-      filters.length > 0 ? `WHERE ${filters.join(" AND ")}` : "";
+    const scopeWhere = scopeFilters.join(" AND ");
 
-    const countResult = await pool.query(
-      `SELECT COUNT(*) FROM ration_cards rc ${whereClause}`,
-      params,
+    const params = [...scopeParams];
+    const filters = [...scopeFilters];
+    if (search) {
+      params.push(toContainsPattern(search));
+      const pattern = `$${params.length}`;
+      filters.push(
+        `(fm_head.name ILIKE ${pattern} OR u.mobile ILIKE ${pattern} OR rc.card_number ILIKE ${pattern})`,
+      );
+    }
+    const whereClause = `WHERE ${filters.join(" AND ")}`;
+
+    const unfilteredResult = await pool.query(
+      `SELECT COUNT(*) FROM ration_cards rc WHERE ${scopeWhere}`,
+      scopeParams,
     );
-    const total = parseInt(countResult.rows[0].count);
+    const unfilteredTotal = parseInt(unfilteredResult.rows[0].count);
+
+    let total = unfilteredTotal;
+    if (search) {
+      const matchResult = await pool.query(
+        `SELECT COUNT(*) FROM ration_cards rc ${HEAD_JOINS_SQL} ${whereClause}`,
+        params,
+      );
+      total = parseInt(matchResult.rows[0].count);
+    }
 
     params.push(limit);
     const limitIdx = params.length;
@@ -212,8 +249,7 @@ const getBeneficiaries = async (req, res, next) => {
          a.name AS area_name,
          (SELECT COUNT(*) FROM family_members fm_c WHERE fm_c.ration_card_id = rc.id)::int AS family_size
        FROM ration_cards rc
-       LEFT JOIN family_members fm_head ON fm_head.ration_card_id = rc.id AND fm_head.is_head = true
-       LEFT JOIN users u  ON u.id  = fm_head.user_id
+       ${HEAD_JOINS_SQL}
        LEFT JOIN shops s  ON s.id  = rc.shop_id
        LEFT JOIN areas a  ON a.id  = rc.area_id
        ${whereClause}
@@ -224,7 +260,13 @@ const getBeneficiaries = async (req, res, next) => {
 
     return res.status(200).json({
       data: result.rows,
-      pagination: { page, limit, total, total_pages: Math.ceil(total / limit) },
+      pagination: {
+        page,
+        limit,
+        total,
+        total_pages: Math.ceil(total / limit),
+        unfiltered_total: unfilteredTotal,
+      },
     });
   } catch (error) {
     return next(error);
@@ -1200,19 +1242,16 @@ const bulkAddFamilyMembers = async (req, res, next) => {
         [cardId, memberUserId, member_name.trim(), ageNum, relationship?.trim() || null],
       );
 
-      // Adding a family member no longer tops the wallet up: allocation is
-      // per ration card, so household size does not change it. The wallet is
-      // re-set to the card's per-card allocation instead of accumulating —
-      // incrementing here is what used to push balances far past anything a
-      // single dispensing transaction could complete.
+      // Adding a family member does not change the card's allocation (it is
+      // per ration card), and must not reset a balance the household has
+      // already drawn down this month. The wallet is only created if the card
+      // has none; an existing wallet is left untouched.
       const { riceKg, wheatKg } = allocationForPolicy(policy);
       await client.query(
-        `UPDATE wallets SET
-           rice_balance_kg  = $1,
-           wheat_balance_kg = $2,
-           updated_at = NOW()
-         WHERE ration_card_id = $3`,
-        [riceKg, wheatKg, cardId],
+        `INSERT INTO wallets (ration_card_id, rice_balance_kg, wheat_balance_kg)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (ration_card_id) DO NOTHING`,
+        [cardId, riceKg, wheatKg],
       );
 
       await client.query("COMMIT");
