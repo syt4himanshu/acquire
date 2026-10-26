@@ -3,7 +3,6 @@ import {
   Store,
   Users,
   ArrowLeftRight,
-  Wallet,
   CreditCard,
   ClipboardList,
   MapPin,
@@ -11,7 +10,6 @@ import {
   Cable,
   Anchor,
   ShieldAlert,
-  ScrollText,
   UserCog,
   SlidersHorizontal,
   Cpu,
@@ -41,7 +39,6 @@ export const ADMIN_NAV_SECTIONS = [
       { label: 'Ration Cards', to: '/admin/ration-cards', icon: CreditCard },
       { label: 'Beneficiaries', to: '/admin/beneficiaries', icon: Users },
       { label: 'Entitlements', to: '/admin/entitlements', icon: ClipboardList },
-      { label: 'Wallets', to: '/admin/wallets', icon: Wallet },
       { label: 'Dispenses', to: '/admin/dispenses', icon: ArrowLeftRight },
     ],
   },
@@ -57,7 +54,6 @@ export const ADMIN_NAV_SECTIONS = [
     title: 'INCIDENTS',
     items: [
       { label: 'Anomalies', to: '/admin/anomalies', icon: ShieldAlert },
-      { label: 'Audit Log', to: '/admin/audit', icon: ScrollText },
     ],
   },
   {

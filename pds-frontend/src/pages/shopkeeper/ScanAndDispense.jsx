@@ -111,7 +111,7 @@ const ScanAndDispense = () => {
     () => () => {
       const sessionId = activeSessionIdRef.current;
       if (sessionId)
-        api.post(`/api/dispense/session/${sessionId}/cancel`).catch(() => {});
+        api.post(`/api/dispense/session/${sessionId}/cancel`).catch(() => { });
     },
     [],
   );
@@ -174,10 +174,10 @@ const ScanAndDispense = () => {
   const activeCommodity = remainingCommodities[0] || null;
   const isZeroReadingFresh = Boolean(
     deviceStatus?.current_weight_at &&
-      Math.abs(
-        deviceStatus.receivedAt -
-          new Date(deviceStatus.current_weight_at).getTime(),
-      ) <= READING_STALE_AFTER_MS,
+    Math.abs(
+      deviceStatus.receivedAt -
+      new Date(deviceStatus.current_weight_at).getTime(),
+    ) <= READING_STALE_AFTER_MS,
   );
   const isPanResetVerified =
     zeroReadings.length >= ZERO_RESET_REQUIRED_READINGS &&
@@ -185,8 +185,8 @@ const ScanAndDispense = () => {
       (reading) => Math.abs(reading.grams) <= ZERO_RESET_TOLERANCE_GRAMS,
     ) &&
     Math.max(...zeroReadings.map((reading) => reading.grams)) -
-      Math.min(...zeroReadings.map((reading) => reading.grams)) <=
-      ZERO_RESET_TOLERANCE_GRAMS;
+    Math.min(...zeroReadings.map((reading) => reading.grams)) <=
+    ZERO_RESET_TOLERANCE_GRAMS;
 
   const resetToScan = () => {
     setFlowState(FLOW.SCANNING);
@@ -198,7 +198,7 @@ const ScanAndDispense = () => {
     if (activeSessionIdRef.current) {
       api
         .post(`/api/dispense/session/${activeSessionIdRef.current}/cancel`)
-        .catch(() => {});
+        .catch(() => { });
       activeSessionIdRef.current = null;
     }
     setWeighingSession(null);
@@ -234,7 +234,16 @@ const ScanAndDispense = () => {
       setDeviceStatus(deviceStatusRes.data);
       setFlowState(FLOW.BENEFICIARY_LOADED);
     } catch (error) {
-      toast.danger(error.response?.data?.error || "Failed to load beneficiary");
+      const errorDetail = error.response?.data?.detail;
+      const errorMsg = error.response?.data?.error || "Failed to load beneficiary";
+
+      if (errorDetail === "WALLET_NOT_PROVISIONED") {
+        toast.danger(
+          "This ration card has not been provisioned yet. Please contact the administrator to run the monthly entitlement allocation."
+        );
+      } else {
+        toast.danger(errorMsg);
+      }
       resetToScan();
     } finally {
       setLoading(false);
@@ -279,7 +288,7 @@ const ScanAndDispense = () => {
     } catch (error) {
       toast.danger(
         error.response?.data?.error ||
-          `Failed to start ${commodity} weighing session`,
+        `Failed to start ${commodity} weighing session`,
       );
     } finally {
       setLoading(false);
@@ -575,7 +584,7 @@ const ScanAndDispense = () => {
                   </span>
                   <span className="font-semibold tabular-nums text-text-primary">
                     {isZeroReadingFresh &&
-                    Number.isFinite(deviceStatus?.current_weight_grams)
+                      Number.isFinite(deviceStatus?.current_weight_grams)
                       ? `${deviceStatus.current_weight_grams} g`
                       : "Waiting for scale"}
                   </span>
@@ -584,8 +593,8 @@ const ScanAndDispense = () => {
                   {!scaleOnline
                     ? "Scale disconnected; reconnect to continue."
                     : isPanResetVerified
-                    ? `Scale reset verified. Ready for ${activeCommodity}.`
-                    : `${zeroReadings.length} of ${ZERO_RESET_REQUIRED_READINGS} fresh zero readings verified.`}
+                      ? `Scale reset verified. Ready for ${activeCommodity}.`
+                      : `${zeroReadings.length} of ${ZERO_RESET_REQUIRED_READINGS} fresh zero readings verified.`}
                 </p>
                 <Button
                   variant="primary"
@@ -600,102 +609,102 @@ const ScanAndDispense = () => {
 
           {(flowState === FLOW.REVIEW ||
             Object.keys(completedMeasurements).length > 0) && (
-            <Card bodyClassName="space-y-4">
-              <h3 className="font-semibold text-text-primary">
-                Measurement review
-              </h3>
-              <div className="overflow-x-auto">
-                <table className="w-full min-w-[34rem] text-left text-sm">
-                  <thead className="border-b border-border text-xs text-text-secondary">
-                    <tr>
-                      <th className="py-2 pr-3 font-medium">Commodity</th>
-                      <th className="py-2 pr-3 font-medium">Target</th>
-                      <th className="py-2 pr-3 font-medium">Measured</th>
-                      <th className="py-2 font-medium">Validation</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {requiredCommodities.map((commodity) => {
-                      const measurement = completedMeasurements[commodity];
-                      return (
-                        <tr
-                          key={commodity}
-                          className="border-b border-border last:border-0"
-                        >
-                          <th
-                            scope="row"
-                            className="py-3 pr-3 font-medium capitalize text-text-primary"
+              <Card bodyClassName="space-y-4">
+                <h3 className="font-semibold text-text-primary">
+                  Measurement review
+                </h3>
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[34rem] text-left text-sm">
+                    <thead className="border-b border-border text-xs text-text-secondary">
+                      <tr>
+                        <th className="py-2 pr-3 font-medium">Commodity</th>
+                        <th className="py-2 pr-3 font-medium">Target</th>
+                        <th className="py-2 pr-3 font-medium">Measured</th>
+                        <th className="py-2 font-medium">Validation</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {requiredCommodities.map((commodity) => {
+                        const measurement = completedMeasurements[commodity];
+                        return (
+                          <tr
+                            key={commodity}
+                            className="border-b border-border last:border-0"
                           >
-                            {commodity}
-                          </th>
-                          <td className="py-3 pr-3 tabular-nums text-text-secondary">
-                            {measurement
-                              ? `${measurement.entitledGrams.toLocaleString()} g`
-                              : "Pending"}
-                          </td>
-                          <td className="py-3 pr-3 tabular-nums text-text-secondary">
-                            {measurement
-                              ? `${measurement.measuredGrams.toLocaleString()} g`
-                              : "Pending"}
-                          </td>
-                          <td className="py-3">
-                            {measurement ? (
-                              <Badge status="success" dot>
-                                Within ±{measurement.toleranceGrams} g
-                              </Badge>
-                            ) : (
-                              <Badge status="neutral">Not weighed</Badge>
-                            )}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-              {flowState === FLOW.REVIEW && (
-                <div className="space-y-3 border-t border-border pt-4">
-                  <Button
-                    variant="primary"
-                    className="h-11 w-full"
-                    disabled={isFinalizingDistribution}
-                    onClick={
-                      finalizeError && !distributionResult
-                        ? () => setFinalizeError("")
-                        : undefined
-                    }
-                  >
-                    {isFinalizingDistribution
-                      ? "Completing Distribution..."
-                      : distributionResult
-                      ? "Distribution complete"
-                      : finalizeError
-                      ? "Retry Distribution"
-                      : "Complete Distribution"}
-                  </Button>
-                  <p
-                    className="text-center text-xs text-text-secondary"
-                    role={finalizeError ? "alert" : undefined}
-                  >
-                    {isFinalizingDistribution
-                      ? "Finalizing the weighted transaction and updating the wallet."
-                      : distributionResult
-                      ? "The full allocation has been committed and the transaction is recorded."
-                      : finalizeError
-                      ? finalizeError
-                      : "Finalizing the completed measurements now uses the canonical transaction flow."}
-                  </p>
+                            <th
+                              scope="row"
+                              className="py-3 pr-3 font-medium capitalize text-text-primary"
+                            >
+                              {commodity}
+                            </th>
+                            <td className="py-3 pr-3 tabular-nums text-text-secondary">
+                              {measurement
+                                ? `${measurement.entitledGrams.toLocaleString()} g`
+                                : "Pending"}
+                            </td>
+                            <td className="py-3 pr-3 tabular-nums text-text-secondary">
+                              {measurement
+                                ? `${measurement.measuredGrams.toLocaleString()} g`
+                                : "Pending"}
+                            </td>
+                            <td className="py-3">
+                              {measurement ? (
+                                <Badge status="success" dot>
+                                  Within ±{measurement.toleranceGrams} g
+                                </Badge>
+                              ) : (
+                                <Badge status="neutral">Not weighed</Badge>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
                 </div>
-              )}
-              <Button
-                variant="secondary"
-                className="w-full"
-                onClick={resetToScan}
-              >
-                Cancel measurement workflow
-              </Button>
-            </Card>
-          )}
+                {flowState === FLOW.REVIEW && (
+                  <div className="space-y-3 border-t border-border pt-4">
+                    <Button
+                      variant="primary"
+                      className="h-11 w-full"
+                      disabled={isFinalizingDistribution}
+                      onClick={
+                        finalizeError && !distributionResult
+                          ? () => setFinalizeError("")
+                          : undefined
+                      }
+                    >
+                      {isFinalizingDistribution
+                        ? "Completing Distribution..."
+                        : distributionResult
+                          ? "Distribution complete"
+                          : finalizeError
+                            ? "Retry Distribution"
+                            : "Complete Distribution"}
+                    </Button>
+                    <p
+                      className="text-center text-xs text-text-secondary"
+                      role={finalizeError ? "alert" : undefined}
+                    >
+                      {isFinalizingDistribution
+                        ? "Finalizing the weighted transaction and updating the wallet."
+                        : distributionResult
+                          ? "The full allocation has been committed and the transaction is recorded."
+                          : finalizeError
+                            ? finalizeError
+                            : "Finalizing the completed measurements now uses the canonical transaction flow."}
+                    </p>
+                  </div>
+                )}
+                <Button
+                  variant="secondary"
+                  className="w-full"
+                  onClick={resetToScan}
+                >
+                  Cancel measurement workflow
+                </Button>
+              </Card>
+            )}
         </div>
       )}
 

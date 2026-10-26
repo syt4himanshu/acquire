@@ -68,7 +68,7 @@ const captureFailure = (
   if (
     measured === null ||
     Math.abs(Number(measured) - Number(session.entitled_grams)) >
-      Number(session.tolerance_grams)
+    Number(session.tolerance_grams)
   ) {
     return `${label} measurement is outside tolerance`;
   }
@@ -234,7 +234,7 @@ const getBeneficiaryByRationCardId = async (req, res, next) => {
           ON fm_head.ration_card_id = rc.id
          AND fm_head.is_head = true
         LEFT JOIN users u ON u.id = fm_head.user_id
-        JOIN wallets w ON w.ration_card_id = rc.id
+        LEFT JOIN wallets w ON w.ration_card_id = rc.id
         WHERE rc.id = $1
           AND COALESCE(rc.is_active, true) = true
         LIMIT 1
@@ -247,6 +247,18 @@ const getBeneficiaryByRationCardId = async (req, res, next) => {
     }
 
     const row = result.rows[0];
+
+    // Wallet must exist for dispensing to proceed. If the wallet is missing,
+    // return a clear error that distinguishes "beneficiary identified but not
+    // provisioned" from "beneficiary not found". The monthly entitlement cron
+    // creates missing wallets, so this condition indicates either the card was
+    // created outside the standard flow or the cron has not run yet this month.
+    if (row.rice_balance_kg === null || row.wheat_balance_kg === null) {
+      return res.status(400).json({
+        error: "Wallet not provisioned for this ration card",
+        detail: "WALLET_NOT_PROVISIONED",
+      });
+    }
 
     if (row.shop_id !== shop.id) {
       return res
